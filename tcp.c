@@ -7,33 +7,40 @@
 #define _OK     0
 #define _ERROR -1
 
-#define _ERROR_BIND -2
-#define _ERROR_LIST -3
-#define _ERROR_RECV -4
-#define _ERROR_CONN -5
-#define _ERROR_ADDR -6
+#define _ERROR_BIND 1
+#define _ERROR_LIST 2
+#define _ERROR_RECV 3
+#define _ERROR_CONN 4
+#define _ERROR_ADDR 5
 
-#define _MIN_IP_LENGTH 7   /* 1.1.1.1 */
-#define _MAX_IP_LENGTH 15  /* 127.127.127.127 */
+#define _MIN_IP_LENGTH 4   /* a.io */
+#define _MAX_IP_LENGTH 32  /* *.io */
 
-#define _MIN_BUFFER_LENGTH  4096
+#define _MIN_BUFFER_LENGTH 4 * 1024
 #define _MAX_PORT_NUMBER   64000
 
-#define _MSG_HELLO "PlexusTCL tcp/ip server\r\n"
+#define _MSG_HELLO "$$PlexusTCL tcp/ip server\r\n"
 #define _MSG_SERV  "[server]>>"
-#define _MSG_CLNT  "MSG$>>"
+#define _MSG_CLNT  "MSG-$:"
+
+#define GET while (0) {\
+  char * GET_MSG = "GET /index.php HTTP/1.1\r\nHost: example.com\r\nUser-Agent: Mozilla/5.0 (X11; U; Linux i686; ru; rv:1.9b5) Gecko/2008050509 Firefox/3.0b5\r\nAccept: text/html\r\nConnection: close\r\n\0";\
+  send(global_socket, GET_MSG, strlen(GET_MSG) + 1, 0);\
+};\
 
 SOCKET global_socket; /* GLOGAL SOCKET */
 
-void timeprint(void) {
-  time_t timer = time(NULL);
-  struct tm * real_time;
-  char strtime[80] = {0};
+time_t timer;
+struct tm * real_time;
+char strtime[9];
 
+void timeprint(void) {
+  memset(strtime, 0x00, 9);
   memset((void*)&real_time, 0x00, sizeof(real_time));
 
+  timer = time(NULL);
   real_time = localtime(&timer);
-  strftime(strtime, 79, "%H:%M:%S", real_time);
+  strftime(strtime, 9, "%H:%M:%S", real_time);
   printf("[%s] | ", strtime);
 }
 
@@ -49,7 +56,7 @@ int clients_count = 0;
 
 DWORD WINAPI linktoclient(LPVOID client_socket) {
   SOCKET link_socket = ((SOCKET *)client_socket)[0];
-  char local_buffer[_MIN_BUFFER_LENGTH] = {0};
+  unsigned char local_buffer[_MIN_BUFFER_LENGTH] = {0};
   // отправляем клиенту приветствие
   send(link_socket, _MSG_HELLO, sizeof(_MSG_HELLO), 0);
   // цикл эхо-сервера: прием строки от клиента и возвращение ее клиенту
@@ -57,7 +64,6 @@ DWORD WINAPI linktoclient(LPVOID client_socket) {
   // MSG_PEEK - просмотр пришедших ip пакетов
   // MSG_OOB  - прием и передача СРОЧНЫХ сообщений / recv читает такие данные только если send такой же
   while ((bytes_recv = recv(link_socket, local_buffer, _MIN_BUFFER_LENGTH - 1, 0)) && bytes_recv != SOCKET_ERROR) {
-    
     printf("%s\n", local_buffer);
     send(link_socket, local_buffer, bytes_recv, 0);
     memset(local_buffer, 0x00, bytes_recv);
@@ -123,11 +129,12 @@ int server (int port) {
  return _OK;
 }
 
-char buffer[_MIN_BUFFER_LENGTH] = {0};
-
-int client (unsigned char * ip_adress, int port) {
+int client (unsigned char * hostname, int port) {
   // Шаг 3 - установка соединения
   // заполнение структуры sockaddr_in - указание адреса и порта сервера
+
+  unsigned char buffer[_MIN_BUFFER_LENGTH] = {0};   
+
   struct sockaddr_in server_address;
   memset((void*)&server_address, 0x00, sizeof(server_address));
   
@@ -135,11 +142,11 @@ int client (unsigned char * ip_adress, int port) {
   server_address.sin_port = htons(port);
   HOSTENT * server_host;
   // преобразование IP адреса из символьного в сетевой формат
-  if (inet_addr(ip_adress) != INADDR_NONE) // если это IP адресс
-    server_address.sin_addr.s_addr = inet_addr(ip_adress);
+  if (inet_addr(hostname) != INADDR_NONE) // если это IP адресс
+    server_address.sin_addr.s_addr = inet_addr(hostname);
   else { // если это не IP адресс а доменное имя
     // попытка получить IP адрес по доменному имени сервера
-    if (server_host = gethostbyname(ip_adress))
+    if (server_host = gethostbyname(hostname))
       // hst->h_addr_list содержит не массив адресов,
       // а массив указателей на адреса
       ((unsigned long *)&server_address.sin_addr)[0] = ((unsigned long **)server_host->h_addr_list)[0][0];
@@ -152,27 +159,30 @@ int client (unsigned char * ip_adress, int port) {
     return _ERROR_CONN;
 
   timeprint();
-  printf("Connect form \"%s:%d\" complete! ", ip_adress, port);
+  printf("Connect form \"%s:%d\" complete! ", hostname, port);
   printf("Enter \"~quit\" for quit.\n");
   
+  GET
+
   // Шаг 4 - чтение и передача сообщений
   int nsize;
-  while ((nsize = recv(global_socket, buffer, sizeof(buffer) - 1, 0)) != SOCKET_ERROR) {
-    // ставим завершающий ноль в конце строки
-    buffer[nsize] = 0;
-
+  while ((nsize = recv(global_socket, buffer, _MIN_BUFFER_LENGTH - 1, 0)) != SOCKET_ERROR) {
+    // ставим завершающий ноль в конце
+    buffer[nsize] = 0x00;
     // выводим на экран
-    printf("%s%s", _MSG_SERV, buffer);
-
+    //printf("%s%s", _MSG_SERV, buffer);
+    printf("\n%s\n", buffer);
     // читаем пользовательский ввод с клавиатуры
     printf("%s", _MSG_CLNT);
 
-    fgets(buffer, sizeof(buffer) - 1, stdin);
+    fgets(buffer, _MIN_BUFFER_LENGTH - 1, stdin);
 
     // проверка на "quit"
-    if (strcmp(buffer, "~quit\n") == 0)
+    if (strcmp(buffer, "~quit\n") == 0) {
       // Корректный выход
+      printf("You\'r connection close!\n");
       return _OK;
+    }
     
     // передаем строку клиента серверу
     send(global_socket, buffer, strlen(buffer), 0);
@@ -183,10 +193,20 @@ int client (unsigned char * ip_adress, int port) {
   return _OK;
 }
 
+void printsocketmsg(int socket_result) {
+  char * error_msg[] = {"Connect close!","Bind","List",
+                        "Recv","Connect","Address","Unknown"};
+  if (socket_result == 0)
+    printf("%s\n", error_msg[socket_result]);
+  else
+    printf("%s error code: %d\n", error_msg[socket_result], WSAGetLastError());
+}
+
 int main (int argc, char * argv[]) { /* tcp --server --null 6218 */
 
   int tumbler;
-  unsigned char ip_adress[_MAX_IP_LENGTH + 1] = {0};
+  unsigned char buffer[_MIN_BUFFER_LENGTH] = {0};
+  unsigned char hostname[_MAX_IP_LENGTH + 1] = {0};
 
   if (argc != 4) {
     printf("Error: Incorrect count arguments!\n");
@@ -221,7 +241,7 @@ int main (int argc, char * argv[]) { /* tcp --server --null 6218 */
       return _ERROR;
     }
 
-    strncpy(ip_adress, argv[2], _MAX_IP_LENGTH);
+    strncpy(hostname, argv[2], _MAX_IP_LENGTH);
   }
 
   int port = atoi(argv[3]);
@@ -242,7 +262,7 @@ int main (int argc, char * argv[]) { /* tcp --server --null 6218 */
   }
 
   timeprint();
-  printf("Socket: %s\n", buffer);
+  printf("Socket ver: %s\n", buffer);
   memset(buffer, 0x00, _MIN_BUFFER_LENGTH);
 
   global_socket = socket(AF_INET, SOCK_STREAM, 0);
@@ -256,40 +276,11 @@ int main (int argc, char * argv[]) { /* tcp --server --null 6218 */
   timeprint();
   printf("Socket started!\n");
 
-  int result;
-
-  if (tumbler == 0) {
-    result = server(port);
-    switch (result) {
-      case _OK:         printf("Connect close!\n");
-                        break;
-      case _ERROR_BIND: printf("Bind error code: %d\n", WSAGetLastError());
-                        break;
-      case _ERROR_LIST: printf("List error code: %d\n", WSAGetLastError());
-                        break;
-      case _ERROR_RECV: printf("Recv error code: %d\n", WSAGetLastError());
-                        break;
-      case _ERROR_CONN: printf("Connect error code: %d\n", WSAGetLastError());
-                        break;
-      case _ERROR_ADDR: printf("Address error code: %d\n", WSAGetLastError());
-                        break;
-      default:          printf("Error code unknown!\n");
-                        break;
-    }
-  }
-  else
-  if (tumbler == 1) {
-    result = client(ip_adress, port);
-    switch (result) {
-      case _OK:         printf("Connect close!\n");
-                        break;
-      case _ERROR_CONN: printf("Connect error code: %d\n", WSAGetLastError());
-                        break;
-      case _ERROR_ADDR: printf("Address error code: %d\n", WSAGetLastError());
-                        break;
-      default:          printf("Error code unknown!\n");
-                        break;
-    }
+  switch (tumbler) {
+    case 0: printsocketmsg(server(port));
+            break;
+    case 1: printsocketmsg(client(hostname, port));
+            break;
   }
 
   closesocket(global_socket);
