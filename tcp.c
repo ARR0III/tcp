@@ -14,9 +14,9 @@
 #define _ERROR_ADDR 5
 
 #define _MIN_IP_LENGTH 4   /* a.io */
-#define _MAX_IP_LENGTH 64  /* *.io */
+#define _MAX_IP_LENGTH 32  /* *.io */
 
-#define _MIN_BUFFER_LENGTH 4 * 1024
+#define _MIN_BUFFER_LENGTH 16 * 1024
 #define _MAX_PORT_NUMBER   64000
 
 #define _MSG_HELLO "$$PlexusTCL tcp/ip server\r\n"
@@ -52,62 +52,73 @@ int clients_count = 0;
 DWORD WINAPI linktoclient(LPVOID client_socket) {
   SOCKET link_socket = ((SOCKET *)client_socket)[0];
   unsigned char local_buffer[_MIN_BUFFER_LENGTH] = {0};
-
+  // отправляем клиенту приветствие
   send(link_socket, _MSG_HELLO, sizeof(_MSG_HELLO), 0);
-
+  // цикл эхо-сервера: прием строки от клиента и возвращение ее клиенту
   int bytes_recv;
-
+  // MSG_PEEK - просмотр пришедших ip пакетов
+  // MSG_OOB  - прием и передача СРОЧНЫХ сообщений / recv читает такие данные только если send такой же
   while ((bytes_recv = recv(link_socket, local_buffer, _MIN_BUFFER_LENGTH - 1, 0)) && bytes_recv != SOCKET_ERROR) {
     printf("%s\n", local_buffer);
     send(link_socket, local_buffer, bytes_recv, 0);
     memset(local_buffer, 0x00, bytes_recv);
   }
-
-  clients_count--;
+  // если мы здесь, то произошел выход из цикла по причине
+  // возращения функцией recv ошибки - соединение с клиентом разорвано
+  clients_count--; // уменьшаем счетчик активных клиентов
   timeprint();
-  
   printf("Client disconnect!\n");
   printclients_count(clients_count);
-  
+  // закрываем сокет
   closesocket(link_socket);
   return _OK;
 }
 
 int server (int port) {
+  // Шаг 3 - связывание сокета с локальным адресом
   struct sockaddr_in local_address;
   memset((void*)&local_address, 0x00, sizeof(local_address));
+
   local_address.sin_family = AF_INET;
-  local_address.sin_port = htons(port);
-  local_address.sin_addr.s_addr = 0;
-
+  local_address.sin_port = htons(port); // не забываем о сетевом порядке!!!
+  local_address.sin_addr.s_addr = 0;    // сервер принимает подключения
+                                        // на все свои IP-адреса
+  // вызываем bind для связывания
   if (bind(global_socket, &local_address, sizeof(local_address)) != _OK)
-    return _ERROR_BIND;
-
+    return _ERROR_BIND; // WSAGetLastError();
+  // Шаг 4 - ожидание подключений
+  // размер очереди - 0x100
   if (listen(global_socket, 16) != _OK)
+    // Ошибка
     return _ERROR_LIST;
 
   timeprint();
   printf("Connecting users progress...\n");
 
-  SOCKET client_socket;
-  struct sockaddr_in client_address;
+  // Шаг 5 - извлекаем сообщение из очереди
+  SOCKET client_socket; // сокет для клиента
+  struct sockaddr_in client_address; // адрес клиента (заполняется системой)
   
   memset((void*)&client_address, 0x00, sizeof(client_address));
 
+  // функции accept необходимо передать размер структуры
   int client_address_size = sizeof(client_address);
-
+  // цикл извлечения запросов на подключение из очереди
   while (client_socket = accept(global_socket, &client_address, &client_address_size)) {
-    clients_count++;
-
+    clients_count++; // увеличиваем счетчик подключившихся клиентов
+    // пытаемся получить имя хоста
     HOSTENT * host;
     memset((void*)&host, 0x00, sizeof(host));
 
     host = gethostbyaddr((char *)&client_address.sin_addr.s_addr, 4, AF_INET);
-    
+    // вывод сведений о клиенте
     timeprint();
     printf("User: [%s] [%s] connect!\n", host ? host->h_name : "Unknown", inet_ntoa(client_address.sin_addr));
     printclients_count(clients_count);
-
+    // Вызов нового потока для обслужвания клиента
+    // Да, для этого рекомендуется использовать _beginthreadex
+    // но, поскольку никаких вызовов функций стандартной Си библиотеки
+    // поток не делает, можно обойтись и CreateThread
     DWORD new_thread;
     CreateThread(NULL, NULL, &linktoclient, &client_socket, NULL, &new_thread);
   }
@@ -115,63 +126,89 @@ int server (int port) {
 }
 
 int client (unsigned char * hostname, int port) {
-  unsigned char buffer[_MIN_BUFFER_LENGTH] = {0};   
+  // Шаг 3 - установка соединения
+  // заполнение структуры sockaddr_in - указание адреса и порта сервера
 
   struct sockaddr_in server_address;
   memset((void*)&server_address, 0x00, sizeof(server_address));
   
   server_address.sin_family = AF_INET;
-  server_address.sin_port = htons(port);
+  server_address.sin_port = htons(port); /* host to number short (16 bits) */
   HOSTENT * server_host;
-
-  if (inet_addr(hostname) != INADDR_NONE)
+  // преобразование IP адреса из символьного в сетевой формат
+  if (inet_addr(hostname) != INADDR_NONE) /* если это IP адресс */
     server_address.sin_addr.s_addr = inet_addr(hostname);
-  else {
+  else { // если это не IP адресс а доменное имя
+    // попытка получить IP адрес по доменному имени сервера
     if (server_host = gethostbyname(hostname))
+      // hst->h_addr_list содержит не массив адресов,
+      // а массив указателей на адреса
       ((unsigned long *)&server_address.sin_addr)[0] = ((unsigned long **)server_host->h_addr_list)[0][0];
     else
       return _ERROR_ADDR;
   }
 
+  // адрес сервера получен - пытаемся установить соединение
   if (connect(global_socket, &server_address, sizeof(server_address)) != 0)
     return _ERROR_CONN;
 
   timeprint();
-  printf("Connect form \"%s:%d\" complete! ", hostname, port);
-  printf("Enter \"~quit\" for quit.\n");
+  printf("Connect form \"%s:%d\" complete!", hostname, port);
+  printf("Enter \"--quit\" for quit.\n");
 
+  unsigned char * buffer = NULL;
+  buffer = (unsigned char *)calloc(_MIN_BUFFER_LENGTH, 1);
+
+  if (buffer == NULL) {
+    printf("Cannot allocate memory!\n");
+    return _OK;
+  }
+
+  //char * GET_MSG = "GET / HTTP/1.1\r\nHost: hostname\r\n\r\n\0";
+  //send(global_socket, GET_MSG, strlen(GET_MSG), 0);
+
+  // Шаг 4 - чтение и передача сообщений
   int nsize;
   while ((nsize = recv(global_socket, buffer, _MIN_BUFFER_LENGTH - 1, 0)) != SOCKET_ERROR) {
+    // ставим завершающий ноль в конце
     buffer[nsize] = 0x00;
-    
+    // выводим на экран
+    //printf("%s%s", _MSG_SERV, buffer);
     printf("\n%s\n", buffer);
+    memset(buffer, 0x00, _MIN_BUFFER_LENGTH);
+    // читаем пользовательский ввод с клавиатуры
     printf("%s", _MSG_CLNT);
 
     fgets(buffer, _MIN_BUFFER_LENGTH - 1, stdin);
 
-    if (strcmp(buffer, "~quit\n") == 0) {
-      printf("You\'r connection close!\n");
+    // проверка на "quit"
+    if (strcmp(buffer, "--quit\n") == 0) {
+      // Корректный выход
+      printf("You connection close!\n");
+      free(buffer);
       return _OK;
     }
     
+    // передаем строку клиента серверу
     send(global_socket, buffer, strlen(buffer), 0);
     memset(buffer, 0x00, _MIN_BUFFER_LENGTH);
   }
+  free(buffer);
   timeprint();
-  printf("Recv error nimber: %d\n", WSAGetLastError());
+  printf("Recv error number: %d\n", WSAGetLastError());
   return _OK;
 }
 
 void printsocketmsg(int socket_result) {
-  char * error_msg[] = {"Connect close!","Bind","List",
-                        "Recv","Connect","Address","Unknown"};
+  char * socket_msg[] = {"Connect close!","Bind","List","Recv",
+                        "Connect","Address","Unknown"};
   if (socket_result == 0)
-    printf("%s\n", error_msg[socket_result]);
+    printf("%s\n", socket_msg[socket_result]);
   else
-    printf("%s error code: %d\n", error_msg[socket_result], WSAGetLastError());
+    printf("%s error code: %d\n", socket_msg[socket_result], WSAGetLastError());
 }
 
-int main (int argc, char * argv[]) {
+int main (int argc, char * argv[]) { /* tcp --server --null 6218 */
 
   int tumbler;
   unsigned char buffer[_MIN_BUFFER_LENGTH] = {0};
@@ -245,12 +282,7 @@ int main (int argc, char * argv[]) {
   timeprint();
   printf("Socket started!\n");
 
-  switch (tumbler) {
-    case 0: printsocketmsg(server(port));
-            break;
-    case 1: printsocketmsg(client(hostname, port));
-            break;
-  }
+  printsocketmsg(tumbler ? client(hostname, port) : server(port));
 
   closesocket(global_socket);
   WSACleanup();
