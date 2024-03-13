@@ -1,67 +1,140 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include <fcntl.h>
 #include <unistd.h>
 
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 
-#define LISTEN_USERS_MAX 64
-#define BUFFER_SIZE 256
+#define BUFFER_SIZE         1024
+#define IP_PORT_NORMAL      1888
+#define LISTEN_USERS_MAX      16
 
-#define ECHO_LEN 12
+#define ECHO_LEN              12
 
-#define SOCKET_CREATE_ERROR -1
-#define SOCKET_BIND_ERROR   -1
+#define SYS_CALL_SELECT_ERROR -1
+
+#define SOCKET_CREATE_ERROR   -1
+#define SOCKET_BIND_ERROR     -1
+#define SOCKET_ACCEPT_ERROR   -1
+
+#define CANNOT_ALLOCATE_MEMORY 1
 
 #define USER_MSG_QUIT "quit"
 #define USER_MSG_ECHO "echo"
 
+typedef struct USER {
+  int  uds;
+
+  char msg[BUFFER_SIZE];
+  int  msg_len;
+
+  struct USER * prev;
+} user_t;
+
+int users_list_empty(stack_t ** users) {
+ return *users == NULL;
+}
+
+void create_user(user_t ** users, int uds) {
+  user_t * tmp = (user_t *)malloc(sizeof(user_t));
+
+  if (!tmp) exit(CANNOT_ALLOCATE_MEMORY);
+
+  tmp->uds     = uds;
+  tmp->msg_len = 0;
+  tmp->prev    = *users;
+  *users       = tmp;
+}
+
+user_t * user_search(user_t ** users,  int uds) {
+  user_t * tmp = *users;
+
+  while (tmp) {
+    if (tmp->uds == uds)
+      return tmp;
+
+    tmp = tmp->prev;
+  }
+
+  return NULL;
+}
+
+/* I don't understand HOW this SHIT works! */
+void delete_user(user_t ** users, int uds) {
+  while (*users) {
+    if ((*users)->uds == uds) {
+      users_t * tmp = *users;
+      *users = (*users)->prev;
+      free(tmp);
+    }
+    else {
+      users = &((*users)->prev);
+    }
+  }
+}
+
+void nonblock(int sd) {
+  int flags = fcntl(sd, F_GETFL);
+  fcntl(sd, flags | O_NONBLOCK);
+}
+
 int main(int argc, char * argv[]) {
-  int    server_socket = 0;
-  int    client_socket = 0;
 
-  ssize_t count = 0;
+  int     opt = 1;
 
-  int    result   = 0;
-  short  ip_port  = 1888;       /* port number */
-  int    message_from_user_len = 0;
+  int     server_socket;
+  int     client_socket;
 
-  struct sockaddr_in addr;
-  socklen_t addr_size = sizeof(addr);
+  int     users_counter;
+  int     max_uds;
+  int     result;
 
-  struct sockaddr_in addr_user;
-  socklen_t addr_user_size = sizeof(addr_user);
+  short   ip_port = IP_PORT_NORMAL;
 
-  struct timeval tv;  /* timeout 10 second */
-    tv.tv_sec  = 10;
-    tv.tv_usec = 0;
+  user_t * users = NULL;
 
-  char buffer[BUFFER_SIZE];
+  struct user_data ud;
+  size_t ud_size = sizeof(ud);
+
+  fd_set read_uds, write_uds; /* read and write "user descriptor socket" */
+
+  struct sockaddr_in server_addr;
+  struct sockaddr_in user_addr;
+
+  //struct timeval tmp_tv; /* struct for save timeout time */
+
+  //struct timeval tv;     /* timeout 2.5 second */
+  //  tv.tv_sec  = 2;
+  //  tv.tv_usec = 500000; /* max value = 999999 */
 
 /*****************************************************************************/
 
   if (argc == 2) {
     ip_port = (short)atoi(argv[1]);
 
-    if (ip_port < 1001 || ip_port > 32500) {
-      printf("[#] Invalid ip port:%d\n", ip_port);
-      ip_port = 1888;
+    if (ip_port < 1001 || ip_port > 0xFFF0) {
+      printf("[#] Invalid server port number:\t%d\n[#] Set server port:\t%d\n", ip_port, IP_PORT_NORMAL);
+      ip_port = IP_PORT_NORMAL;
     }
   }
 
 /*****************************************************************************/
 
-  memset(&addr,      0x00, addr_size);
-  memset(&addr_user, 0x00, addr_user_size);
-  memset(buffer,     0x00, BUFFER_SIZE);
+  memset(&ud,          0x00, sizeof(ud));
+  memset(&server_addr, 0x00, sizeof(server_addr));
+  memset(&user_addr,   0x00, sizeof(user_addr));
+
+  memset(&users_list, 0x00, LISTEN_USERS_MAX * sizeof(int));
 
 /*****************************************************************************/
 
   addr.sin_family      = AF_INET;
-  addr.sin_port        = htons(ip_port);    /* host to number short  */
-  addr.sin_addr.s_addr = htonl(INADDR_ANY); /* using ip address host */
+  addr.sin_port        = htons(ip_port);    /* port number from user or normal */
+  addr.sin_addr.s_addr = htonl(INADDR_ANY); /* using ip address server host */
 
   server_socket = socket(AF_INET, SOCK_STREAM, 0);
 
@@ -70,7 +143,7 @@ int main(int argc, char * argv[]) {
     exit(1);
   }
 
-  result = bind(server_socket, (struct sockaddr *)&addr, addr_size);
+  result = bind(server_socket, (struct sockaddr *)(&server_addr), sizeof(server_addr));
 
   if (result == SOCKET_BIND_ERROR) {
     printf("[X] SOCKET BIND ERROR.\n");
@@ -78,95 +151,125 @@ int main(int argc, char * argv[]) {
   }
 
   setsockopt(server_socket, SOL_SOCKET, SO_RCVTIMEO,  &tv, sizeof(tv));
-
-  int opt = 1;
-  setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(int));
+  setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt/*int*/));
 
   printf("[#] Server starting port:\t%d\n", ip_port);
 
 /*****************************************************************************/
 
-  message_from_user_len = 0;
-
   result = listen(server_socket, LISTEN_USERS_MAX);
 
-  addr_user_size = sizeof(addr_user);
-  client_socket = accept(server_socket, (struct sockaddr *)&addr_user, &addr_user_size);
-  
-  if (client_socket < 0) {
-    printf("[X] Error connect to user\n");
-    exit(3);
-  }
-
-  result = write(client_socket, "[welcome]", 9);
-
-  if (result <= 0) {
-    printf("[X] Error welcome new user\n");
-    exit(4);
-  }
-
 /*****************************************************************************/
+  
+  FD_CLR(ud, &read_uds);   /*delete discr*/
+  FD_CLR(ud, &write_uds);
+
+  FD_ISSET(ud, &write_uds);
 
   while (1) {
-    result = read(client_socket, buffer, BUFFER_SIZE-1);
+    //memcpy(&tmp_tv, &tv, sizeof(tv));
 
-    if (result <= 0) {
-      printf("[X] Error get message from user\n");
-      break;
-    }
+    max_uds = server_socket;
 
-    buffer[result] = '\0';
+    FD_ZERO(&read_uds);           /*clear lists*/
+    FD_ZERO(&write_uds);   
 
-    if (strcmp(buffer, USER_MSG_QUIT) == 0) {
-      result = write(client_socket, "Goodbye user...", 15);
+    FD_SET(max_uds, &read_uds);   /*set discr*/
 
-      if (result <= 0) {
-        printf("[X] Error send message to user\n");
-      }
-
-      shutdown(client_socket, SHUT_RDWR);
-      close(client_socket);
-      printf("[$$$]client close connect\n");
-      break;
-    }
-
-    if (strcmp(buffer, USER_MSG_ECHO) == 0) {
-      printf("[$$$]client echo check server\n");
-      memcpy(buffer, "echo..echo..", ECHO_LEN);
-      buffer[ECHO_LEN] = '\0';
-      message_from_user_len = ECHO_LEN;
-    }
-
-    if (message_from_user_len) {
-      result = write(client_socket, buffer, message_from_user_len);
-
-      if (result <= 0) {
-        printf("[X] Error send message to user\n");
+    for (users_counter = 0 ;; users_counter++) {
+      if (users_counter >= LISTEN_USERS_MAX || users_list[users_counter] == 0) {
         break;
       }
 
-      message_from_user_len = 0;
+      client_socket = users_list[users_counter];
+
+      FD_SET(client_socket, &read_uds);   /*set discr*/
+
+      if (user_write_ready) {
+        FD_SET(client_socket, &write_uds);
+      }
+
+      if (max_uds < client_socket) {
+        max_uds = client_socket;
+      }
+    }
+
+    result = select(max_uds + 1, &read_uds, &write_uds, NULL, NULL);
+
+    if (result == SYS_CALL_SELECT_ERROR) {
+      if (errno == EINTR) {
+        /* signal */ 
+      }
+      else {
+        /* error select */
+      }
+    }
+
+    if (!result) {
       continue;
     }
 
-    printf("client_msg:%s\n", buffer);
+    if (FD_ISSET(server_socket, &read_uds)) {
+      client_socket = accept(server_socket, (struct sockaddr *)(&user_addr), sizeof(user_addr));
 
-    result = write(client_socket, "[ok]", 4);
+      /*if server are first writer to user, then unblock socket user*/
 
-    if (result <= 0) {
-      printf("[X] Error send message to user\n");
-      break;
+      if (client_socket == SOCKET_ACCEPT_ERROR) {
+        /*error accept user*/
+      }
+
+      if (users_counter >= LISTEN_USERS_MAX-1) {
+        break;
+      }
+      else {
+        create_user(&users, client_socket);
+
+        if (!users) {
+          break;
+        }
+        /*nonblock(result);*/
+      }
+    }
+
+    for (users_counter = 0 ;; users_counter++) {
+      if (users_counter >= LISTEN_USERS_MAX || users_list[users_counter] == 0) {
+        break;
+      }
+
+      client_socket = users_list[users_counter];
+
+      if (FD_ISSET(client_socket, &read_uds)) {
+        result = read_user_message(client_socket);
+
+        if (read == EOF) {
+          /*read from user 0 byte*/
+        }
+      }
+
+      if (FD_ISSET(client_socket, &write_uds)) {
+        result = send_user_message(client_socket);
+      }
     }
   }
 
 /*****************************************************************************/
 
-  memset(&addr,      0x00, addr_size);
-  memset(&addr_user, 0x00, addr_user_size);
-  memset(buffer,     0x00, BUFFER_SIZE);
+  for (users_counter = 0 ;; users_counter++) {
+
+    if (users_counter >= LISTEN_USERS_MAX) {
+      break;
+    }
+
+    if (users_list[users_counter]) {
+      shutdown(users_list[users_counter], SHUT_RDWR);
+      close(users_list[users_counter]);
+    }
+  }
 
   close(server_socket);
-  close(client_socket);
+
+  memset(&server_addr, 0x00, sizeof(server_addr));
+  memset(&user_addr,   0x00, sizeof(user_addr));
 
   return 0;
 }
