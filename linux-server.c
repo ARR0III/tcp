@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <errno.h>
+
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -22,59 +24,30 @@
 #define SOCKET_ACCEPT_ERROR   -1
 
 #define CANNOT_ALLOCATE_MEMORY 1
+#define SELECT_RETURN_ERROR    2
 
 #define USER_MSG_QUIT "quit"
 #define USER_MSG_ECHO "echo"
 
 typedef struct USER {
+  int  id;
   int  uds;
 
-  char msg[BUFFER_SIZE];
-  int  msg_len;
-
-  struct USER * prev;
+  char message[BUFFER_SIZE];
+  int  message_len;
 } user_t;
 
-int users_list_empty(stack_t ** users) {
- return *users == NULL;
-}
-
-void create_user(user_t ** users, int uds) {
+user_t * create_user(int uds) {
   user_t * tmp = (user_t *)malloc(sizeof(user_t));
 
   if (!tmp) exit(CANNOT_ALLOCATE_MEMORY);
 
+  memset(tmp, 0x00, sizeof(user_t));
+
   tmp->uds     = uds;
-  tmp->msg_len = 0;
-  tmp->prev    = *users;
-  *users       = tmp;
-}
+  tmp->message_len = 0;
 
-user_t * user_search(user_t ** users,  int uds) {
-  user_t * tmp = *users;
-
-  while (tmp) {
-    if (tmp->uds == uds)
-      return tmp;
-
-    tmp = tmp->prev;
-  }
-
-  return NULL;
-}
-
-/* I don't understand HOW this SHIT works! */
-void delete_user(user_t ** users, int uds) {
-  while (*users) {
-    if ((*users)->uds == uds) {
-      users_t * tmp = *users;
-      *users = (*users)->prev;
-      free(tmp);
-    }
-    else {
-      users = &((*users)->prev);
-    }
-  }
+  return tmp;
 }
 
 void nonblock(int sd) {
@@ -82,9 +55,19 @@ void nonblock(int sd) {
   fcntl(sd, flags | O_NONBLOCK);
 }
 
-int main(int argc, char * argv[]) {
+int read_user_message(user_t * user, int client_socket) {
+  return read(client_socket, user->message, user->message_len);
+}
 
+int write_user_message(user_t * user, int client_socket) {
+  return write(client_socket, user->message, user->message_len);
+}
+
+int main(int argc, char * argv[]) {
+  int     i;
   int     opt = 1;
+  //int     user_write_ready = 0;
+  //int     user_read_ready = 0;
 
   int     server_socket;
   int     client_socket;
@@ -95,46 +78,41 @@ int main(int argc, char * argv[]) {
 
   short   ip_port = IP_PORT_NORMAL;
 
-  user_t * users = NULL;
-
-  struct user_data ud;
-  size_t ud_size = sizeof(ud);
+  user_t * users_list[LISTEN_USERS_MAX];
 
   fd_set read_uds, write_uds; /* read and write "user descriptor socket" */
 
   struct sockaddr_in server_addr;
   struct sockaddr_in user_addr;
+  socklen_t user_addr_len = sizeof(user_addr);
 
   //struct timeval tmp_tv; /* struct for save timeout time */
 
-  //struct timeval tv;     /* timeout 2.5 second */
-  //  tv.tv_sec  = 2;
-  //  tv.tv_usec = 500000; /* max value = 999999 */
+  struct timeval tv;     /* timeout 2.5 second */
+    tv.tv_sec  = 2;
+    tv.tv_usec = 500000; /* max value = 999999 */
 
 /*****************************************************************************/
 
   if (argc == 2) {
     ip_port = (short)atoi(argv[1]);
 
-    if (ip_port < 1001 || ip_port > 0xFFF0) {
-      printf("[#] Invalid server port number:\t%d\n[#] Set server port:\t%d\n", ip_port, IP_PORT_NORMAL);
+    if (ip_port < 1001 || ip_port > 0xFFFF) {
+      printf("[#] Invalid server port number:\t%s\n[#] Set server port:\t%d\n", argv[1], IP_PORT_NORMAL);
       ip_port = IP_PORT_NORMAL;
     }
   }
 
 /*****************************************************************************/
 
-  memset(&ud,          0x00, sizeof(ud));
   memset(&server_addr, 0x00, sizeof(server_addr));
   memset(&user_addr,   0x00, sizeof(user_addr));
 
-  memset(&users_list, 0x00, LISTEN_USERS_MAX * sizeof(int));
-
 /*****************************************************************************/
 
-  addr.sin_family      = AF_INET;
-  addr.sin_port        = htons(ip_port);    /* port number from user or normal */
-  addr.sin_addr.s_addr = htonl(INADDR_ANY); /* using ip address server host */
+  server_addr.sin_family      = AF_INET;
+  server_addr.sin_port        = htons(ip_port);    /* port number from user or normal */
+  server_addr.sin_addr.s_addr = htonl(INADDR_ANY); /* using ip address server host */
 
   server_socket = socket(AF_INET, SOCK_STREAM, 0);
 
@@ -159,37 +137,35 @@ int main(int argc, char * argv[]) {
 
   result = listen(server_socket, LISTEN_USERS_MAX);
 
-/*****************************************************************************/
-  
-  FD_CLR(ud, &read_uds);   /*delete discr*/
-  FD_CLR(ud, &write_uds);
+  printf("[#] Listing clients...\n[#] Maximal clients:\t%d\n", LISTEN_USERS_MAX); 
 
-  FD_ISSET(ud, &write_uds);
+/*****************************************************************************/
+
+  for (i = 0; i < LISTEN_USERS_MAX; i++) {
+    users_list[i] = create_user(0);
+    users_list[i]->id = i+1;
+  }
 
   while (1) {
-    //memcpy(&tmp_tv, &tv, sizeof(tv));
-
     max_uds = server_socket;
 
     FD_ZERO(&read_uds);           /*clear lists*/
-    FD_ZERO(&write_uds);   
+    FD_ZERO(&write_uds);
 
     FD_SET(max_uds, &read_uds);   /*set discr*/
 
-    for (users_counter = 0 ;; users_counter++) {
-      if (users_counter >= LISTEN_USERS_MAX || users_list[users_counter] == 0) {
-        break;
+    for (users_counter = 0; users_counter < LISTEN_USERS_MAX; users_counter++) {
+      client_socket = (*users_list[users_counter]).uds;
+
+      if (client_socket) {
+        FD_SET(client_socket, &read_uds);   /*set discr*/
       }
 
-      client_socket = users_list[users_counter];
+      //if (user_write_ready) {
+      //  FD_SET(client_socket, &write_uds);
+      //}
 
-      FD_SET(client_socket, &read_uds);   /*set discr*/
-
-      if (user_write_ready) {
-        FD_SET(client_socket, &write_uds);
-      }
-
-      if (max_uds < client_socket) {
+      if (client_socket > max_uds) {
         max_uds = client_socket;
       }
     }
@@ -198,75 +174,85 @@ int main(int argc, char * argv[]) {
 
     if (result == SYS_CALL_SELECT_ERROR) {
       if (errno == EINTR) {
-        /* signal */ 
+        /* signal */
+        continue;
       }
       else {
         /* error select */
+        printf("[X] System call \"select\" return error:\t%d\n", errno);
+        perror("select");
+        exit(SELECT_RETURN_ERROR);
       }
     }
 
-    if (!result) {
+    if (!result) { /* not data for check or reaction */
       continue;
     }
 
     if (FD_ISSET(server_socket, &read_uds)) {
-      client_socket = accept(server_socket, (struct sockaddr *)(&user_addr), sizeof(user_addr));
+      client_socket = accept(server_socket, (struct sockaddr *)(&user_addr), &user_addr_len);
 
       /*if server are first writer to user, then unblock socket user*/
 
       if (client_socket == SOCKET_ACCEPT_ERROR) {
+        printf("[!] User don\'t connect code:%d", errno);
+        continue;
         /*error accept user*/
       }
 
-      if (users_counter >= LISTEN_USERS_MAX-1) {
-        break;
+      if (users_counter >= LISTEN_USERS_MAX) {
+        printf("[!] Users connect to server MAX");
+        continue;
       }
-      else {
-        create_user(&users, client_socket);
 
-        if (!users) {
-          break;
-        }
-        /*nonblock(result);*/
-      }
+      nonblock(client_socket);
+      write(client_socket, "Welcome!\n", 9);
+
+      (*users_list[users_counter]).uds = client_socket;
+
+      //if (!users) {
+      //  break;
+      //}
     }
 
-    for (users_counter = 0 ;; users_counter++) {
-      if (users_counter >= LISTEN_USERS_MAX || users_list[users_counter] == 0) {
-        break;
-      }
-
-      client_socket = users_list[users_counter];
+    for (users_counter = 0; users_counter < LISTEN_USERS_MAX; users_counter++) {
+      client_socket = (*users_list[users_counter]).uds;
 
       if (FD_ISSET(client_socket, &read_uds)) {
-        result = read_user_message(client_socket);
+        result = read_user_message(users_list[users_counter], client_socket);
 
-        if (read == EOF) {
-          /*read from user 0 byte*/
+        if (result == EOF) { /*read from user 0 byte*/
+          shutdown(client_socket, SHUT_RDWR);
+          close(client_socket);
         }
       }
 
       if (FD_ISSET(client_socket, &write_uds)) {
-        result = send_user_message(client_socket);
+        result = write_user_message(users_list[users_counter], client_socket);
+
+        if (result == EOF) {
+
+        }
       }
     }
   }
 
 /*****************************************************************************/
 
-  for (users_counter = 0 ;; users_counter++) {
+  for (users_counter = 0; users_counter < LISTEN_USERS_MAX; users_counter++) {
+    client_socket = (*users_list[users_counter]).uds;
 
-    if (users_counter >= LISTEN_USERS_MAX) {
-      break;
-    }
-
-    if (users_list[users_counter]) {
-      shutdown(users_list[users_counter], SHUT_RDWR);
-      close(users_list[users_counter]);
+    if (client_socket) {
+      shutdown(client_socket, SHUT_RDWR);
+      close(client_socket);
     }
   }
 
   close(server_socket);
+
+  for (i = 0; i < LISTEN_USERS_MAX; i++) {
+    free(users_list[i]);
+  }
 
   memset(&server_addr, 0x00, sizeof(server_addr));
   memset(&user_addr,   0x00, sizeof(user_addr));
