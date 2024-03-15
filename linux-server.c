@@ -11,6 +11,9 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 
+#define TRUE                   1
+#define FALSE                  0
+
 #define BUFFER_SIZE         1024
 #define IP_PORT_NORMAL      1888
 #define LISTEN_USERS_MAX      16
@@ -33,8 +36,12 @@ typedef struct USER {
   int  id;
   int  uds;
 
+  int  connect;
+
   char message[BUFFER_SIZE];
   int  message_len;
+
+  int  rewrite;
 } user_t;
 
 user_t * create_user(int uds) {
@@ -55,24 +62,39 @@ void nonblock(int sd) {
   fcntl(sd, flags | O_NONBLOCK);
 }
 
-int read_user_message(user_t * user, int client_socket) {
-  return read(client_socket, user->message, user->message_len);
+int read_user_message(int client_socket, user_t * user) {
+  user->message_len = read(client_socket, user->message, BUFFER_SIZE-1);
+
+  return user->message_len;
 }
 
-int write_user_message(user_t * user, int client_socket) {
-  return write(client_socket, user->message, user->message_len);
+int write_user_message(int client_socket, user_t * user) {
+  int result;
+
+  result = write(client_socket, user->message + user->rewrite, user->message_len);
+
+  if (result == user->message_len) {
+    user->rewrite = 0;
+    user->message_len = 0;
+    return result;
+  }
+
+  if (result && result < user->message_len) {
+    user->rewrite     = user->message_len - (user->message_len - result);
+    user->message_len = user->message_len - result;
+  }
+
+  return result;
 }
 
 int main(int argc, char * argv[]) {
   int     i;
   int     opt = 1;
-  //int     user_write_ready = 0;
-  //int     user_read_ready = 0;
 
   int     server_socket;
   int     client_socket;
 
-  int     users_counter;
+  int     users_counter = 0;
   int     max_uds;
   int     result;
 
@@ -110,6 +132,17 @@ int main(int argc, char * argv[]) {
 
 /*****************************************************************************/
 
+  for (i = 0; i < LISTEN_USERS_MAX; i++) {
+    users_list[i] = create_user(0);
+
+    users_list[i]->id          = i+1;
+    users_list[i]->connect     = FALSE;
+    users_list[i]->message_len = 0;
+    users_list[i]->rewrite     = 0;
+  }
+
+/*****************************************************************************/
+
   server_addr.sin_family      = AF_INET;
   server_addr.sin_port        = htons(ip_port);    /* port number from user or normal */
   server_addr.sin_addr.s_addr = htonl(INADDR_ANY); /* using ip address server host */
@@ -118,14 +151,14 @@ int main(int argc, char * argv[]) {
 
   if (server_socket == SOCKET_CREATE_ERROR) {
     printf("[X] SOCKET CREATE ERROR.\n");
-    exit(1);
+    exit(SOCKET_CREATE_ERROR);
   }
 
   result = bind(server_socket, (struct sockaddr *)(&server_addr), sizeof(server_addr));
 
   if (result == SOCKET_BIND_ERROR) {
     printf("[X] SOCKET BIND ERROR.\n");
-    exit(2);
+    exit(SOCKET_BIND_ERROR);
   }
 
   setsockopt(server_socket, SOL_SOCKET, SO_RCVTIMEO,  &tv, sizeof(tv));
@@ -137,14 +170,9 @@ int main(int argc, char * argv[]) {
 
   result = listen(server_socket, LISTEN_USERS_MAX);
 
-  printf("[#] Listing clients...\n[#] Maximal clients:\t%d\n", LISTEN_USERS_MAX); 
+  printf("[#] Listening clients...\n[#] Maximal clients:\t%d\n", LISTEN_USERS_MAX); 
 
 /*****************************************************************************/
-
-  for (i = 0; i < LISTEN_USERS_MAX; i++) {
-    users_list[i] = create_user(0);
-    users_list[i]->id = i+1;
-  }
 
   while (1) {
     max_uds = server_socket;
@@ -154,23 +182,26 @@ int main(int argc, char * argv[]) {
 
     FD_SET(max_uds, &read_uds);   /*set discr*/
 
-    for (users_counter = 0; users_counter < LISTEN_USERS_MAX; users_counter++) {
-      client_socket = (*users_list[users_counter]).uds;
+    for (i = 0; i < LISTEN_USERS_MAX; i++) {
+      client_socket = (*users_list[i]).uds;
 
-      if (client_socket) {
-        FD_SET(client_socket, &read_uds);   /*set discr*/
+      if ((*users_list[i]).connect) {
+        FD_SET(client_socket, &read_uds);    /*set discr*/
       }
 
-      //if (user_write_ready) {
-      //  FD_SET(client_socket, &write_uds);
-      //}
+      if ((*users_list[i]).message_len > 0) {
+        FD_SET(client_socket, &write_uds);
+      }
 
       if (client_socket > max_uds) {
         max_uds = client_socket;
       }
     }
 
-    result = select(max_uds + 1, &read_uds, &write_uds, NULL, NULL);
+    tv.tv_sec  = 2;
+    tv.tv_usec = 500000; /* max value = 999999 */
+
+    result = select(max_uds + 1, &read_uds, &write_uds, NULL, &tv);
 
     if (result == SYS_CALL_SELECT_ERROR) {
       if (errno == EINTR) {
@@ -200,8 +231,9 @@ int main(int argc, char * argv[]) {
         /*error accept user*/
       }
 
-      if (users_counter >= LISTEN_USERS_MAX) {
-        printf("[!] Users connect to server MAX");
+      if (users_counter >= (LISTEN_USERS_MAX-1)) {
+        printf("[!] Users connect to server MAXIMAL:\t%d\n", LISTEN_USERS_MAX);
+        close(client_socket);
         continue;
       }
 
@@ -209,26 +241,41 @@ int main(int argc, char * argv[]) {
       write(client_socket, "Welcome!\n", 9);
 
       (*users_list[users_counter]).uds = client_socket;
+      (*users_list[users_counter]).connect = TRUE;
+
+      users_counter++;
+
+      printf("[@] User \"%d\" connect to server!\n", (*users_list[users_counter]).id);  
 
       //if (!users) {
       //  break;
       //}
     }
 
-    for (users_counter = 0; users_counter < LISTEN_USERS_MAX; users_counter++) {
-      client_socket = (*users_list[users_counter]).uds;
+    for (i = 0; i < LISTEN_USERS_MAX; i++) {
+      client_socket = (*users_list[i]).uds;
 
       if (FD_ISSET(client_socket, &read_uds)) {
-        result = read_user_message(users_list[users_counter], client_socket);
 
-        if (result == EOF) { /*read from user 0 byte*/
+        if (read_user_message(client_socket, users_list[i]) == EOF) { /*read from user 0 byte*/
           shutdown(client_socket, SHUT_RDWR);
           close(client_socket);
+
+          (*users_list[i]).uds = 0;
+          (*users_list[i]).connect = FALSE;
+          (*users_list[i]).message_len = 0;
+          (*users_list[i]).rewrite = 0;
+          users_counter--;
+
+          printf("[!] User \"%d\" disconnect!\n", (*users_list[i]).id);
         }
+
+        printf("[User #%d]>>>%s\n", (*users_list[i]).id, (*users_list[i]).message);
+
       }
 
       if (FD_ISSET(client_socket, &write_uds)) {
-        result = write_user_message(users_list[users_counter], client_socket);
+        result = write_user_message(client_socket, users_list[i]);
 
         if (result == EOF) {
 
@@ -239,10 +286,10 @@ int main(int argc, char * argv[]) {
 
 /*****************************************************************************/
 
-  for (users_counter = 0; users_counter < LISTEN_USERS_MAX; users_counter++) {
-    client_socket = (*users_list[users_counter]).uds;
+  for (i = 0; i < LISTEN_USERS_MAX; i++) {
+    client_socket = (*users_list[i]).uds;
 
-    if (client_socket) {
+    if ((*users_list[i]).connect) {
       shutdown(client_socket, SHUT_RDWR);
       close(client_socket);
     }
