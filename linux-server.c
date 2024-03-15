@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <ctype.h>
+
 #include <errno.h>
 
 #include <fcntl.h>
@@ -60,6 +62,20 @@ user_t * create_user(int uds) {
 void nonblock(int sd) {
   int flags = fcntl(sd, F_GETFL);
   fcntl(sd, flags | O_NONBLOCK);
+}
+
+int correct_message(user_t * user) {
+  int i;
+
+  if (user->message_len == 0) return FALSE;
+
+  for (i = 0; i < user->message_len; i++) {
+    if (!isprint((int)(user->message[i]))) {
+      return FALSE;
+    }
+  }
+
+  return TRUE;
 }
 
 int read_user_message(int client_socket, user_t * user) {
@@ -270,8 +286,13 @@ int main(int argc, char * argv[]) {
           printf("[!] User \"%d\" disconnect!\n", (*users_list[i]).id);
         }
 
-        printf("[User #%d]>>>%s\n", (*users_list[i]).id, (*users_list[i]).message);
-
+        if (correct_message(users_list[i])) {
+          printf("[User #%d]>>>%s\n", (*users_list[i]).id, (*users_list[i]).message);
+        }
+        else {
+          shutdown(client_socket, SHUT_RDWR);
+          close(client_socket);
+        }
       }
 
       if (FD_ISSET(client_socket, &write_uds)) {
