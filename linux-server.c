@@ -28,8 +28,11 @@
 #define SOCKET_BIND_ERROR     -1
 #define SOCKET_ACCEPT_ERROR   -1
 
-#define CANNOT_ALLOCATE_MEMORY 1
-#define SELECT_RETURN_ERROR    2
+/* error codes for stderr stream */
+#define RETURN_MEMORY_ERROR    1
+#define RETURN_SOCKET_ERROR    2
+#define RETURN_BIND_ERROR      3
+#define RETURN_SELECT_ERROR    4
 
 #define USER_MSG_QUIT "quit"
 #define USER_MSG_ECHO "echo"
@@ -46,7 +49,7 @@ typedef struct USER {
 user_t * create_user(int uds) {
   user_t * tmp = (user_t *)malloc(sizeof(user_t));
 
-  if (!tmp) exit(1);
+  if (!tmp) exit(RETURN_MEMORY_ERROR);
 
   memset(tmp, 0x00, sizeof(user_t));
 
@@ -83,10 +86,17 @@ int read_user_message(int client_socket, user_t * user) {
   int result = read(client_socket, user->message, BUFFER_SIZE-1);
 
   if (result != EOF) {
-    user->message_len = result;
-
-    if (result <= BUFFER_SIZE-1) {
+    if (result < BUFFER_SIZE) {
       user->message[result] = '\0';
+      user->message_len = result;
+      user->rewrite = 0;
+    }
+    else {
+      /* if read > buffer length (buffer owerflow) then return EOF */
+      memset(user->message, 0x00, BUFFER_SIZE);
+      user->message_len = 0;
+      user->rewrite = 0;
+      result = EOF;
     }
   }
 
@@ -96,7 +106,12 @@ int read_user_message(int client_socket, user_t * user) {
 int write_user_message(int client_socket, user_t * user) {
   int result;
 
-  result = write(client_socket, user->message + user->rewrite, user->message_len);
+  if (user->message_len > 0) {
+    result = write(client_socket, user->message + user->rewrite, user->message_len);
+  }
+  else {
+    return EOF;
+  }
 
   if (result == user->message_len) {
     user->rewrite = 0;
@@ -174,14 +189,14 @@ int main(int argc, char * argv[]) {
 
   if (server_socket == SOCKET_CREATE_ERROR) {
     printf("[X] SOCKET CREATE ERROR.\n");
-    exit(2);
+    exit(RETURN_SOCKET_ERROR);
   }
 
   result = bind(server_socket, (struct sockaddr *)(&server_addr), sizeof(server_addr));
 
   if (result == SOCKET_BIND_ERROR) {
     printf("[X] SOCKET BIND ERROR.\n");
-    exit(3);
+    exit(RETURN_BIND_ERROR);
   }
 
   setsockopt(server_socket, SOL_SOCKET, SO_RCVTIMEO,  &tv, sizeof(tv));
@@ -200,20 +215,19 @@ int main(int argc, char * argv[]) {
   while (1) {
     max_uds = server_socket;
 
-    FD_ZERO(&read_uds);           /*clear lists*/
-    FD_ZERO(&write_uds);
-
-    FD_SET(max_uds, &read_uds);   /*set discr*/
+    FD_ZERO(&read_uds);                 /*clear lists for read*/
+    FD_ZERO(&write_uds);                /*clear lists for read*/
+    FD_SET(server_socket, &read_uds);   /*set server for select*/
 
     for (i = 0; i < LISTEN_USERS_MAX; i++) {
-      client_socket = (*users_list[i]).uds;
+      client_socket = (*users_list[i]).uds;  /*uds set if user connect*/
 
       if (client_socket > 0) {
         FD_SET(client_socket, &read_uds);    /*set discr*/
-      }
 
-      if ((*users_list[i]).message_len > 0 || (*users_list[i]).rewrite > 0) {
-        FD_SET(client_socket, &write_uds);
+        if ((*users_list[i]).message_len > 0) {
+          FD_SET(client_socket, &write_uds);
+        }
       }
 
       if (client_socket > max_uds) {
@@ -235,7 +249,7 @@ int main(int argc, char * argv[]) {
         /* error select */
         printf("[X] System call \"select\" return error:\t%d\n", errno);
         perror("select");
-        exit(SELECT_RETURN_ERROR);
+        exit(RETURN_SELECT_ERROR);
       }
     }
 
@@ -255,7 +269,7 @@ int main(int argc, char * argv[]) {
       }
 
       if (users_counter >= (LISTEN_USERS_MAX-1)) {
-        printf("[!] Users connect to server MAXIMAL:\t%d\n", LISTEN_USERS_MAX);
+        printf("[!] Maximal users on server:\t%d\n", LISTEN_USERS_MAX);
         close(client_socket);
         continue;
       }
@@ -271,8 +285,8 @@ int main(int argc, char * argv[]) {
     }
 
     for (i = 0; i < LISTEN_USERS_MAX; i++) {
-      if (!users_counter) {
-        break;
+      if (users_counter == 0) {
+       break;
       }
 
       client_socket = (*users_list[i]).uds;
@@ -280,10 +294,15 @@ int main(int argc, char * argv[]) {
       if (FD_ISSET(client_socket, &read_uds)) {
         result = read_user_message(client_socket, users_list[i]);
 
-        if (result == EOF) { /*read from user 0 byte*/
+        if (result == EOF || result == 0) { /*read from user 0 byte*/
+
+          FD_CLR(client_socket, &read_uds);
+          FD_CLR(client_socket, &write_uds);
 
           shutdown(client_socket, SHUT_RDWR);
           close(client_socket);
+
+          memset((*users_list[i]).message, 0x00, BUFFER_SIZE);
 
           (*users_list[i]).uds = 0;
           (*users_list[i]).message_len = 0;
@@ -292,19 +311,26 @@ int main(int argc, char * argv[]) {
           users_counter--;
 
           printf("[!] User \"%d\" disconnect!\n", (*users_list[i]).id);
+
+          if (users_counter == 0) {
+            printf("[!] Not active connections!\n");
+            break;
+          }
+
           continue;
         }
 
-        if (result > 0 && correct_message(users_list[i])) {
-          printf("[User #%d]>>>%s\n", (*users_list[i]).id, (*users_list[i]).message);
-          continue;
+        if (result > 0) {
+          if (correct_message(users_list[i]) == TRUE) {
+            printf("[User #%d]>>>%s\n", (*users_list[i]).id, (*users_list[i]).message);
+          }
+          else {
+            write(client_socket, "EOF.\n", 5);
+
+            (*users_list[i]).message_len = 0;
+            (*users_list[i]).rewrite = 0;
+          }
         }
-
-        write(client_socket, "EOF.\n", 5);
-
-        (*users_list[i]).message_len = 0;
-        (*users_list[i]).rewrite = 0;
-
       }
 
       if (FD_ISSET(client_socket, &write_uds)) {
@@ -313,8 +339,6 @@ int main(int argc, char * argv[]) {
 
           (*users_list[i]).message_len = 0;
           (*users_list[i]).rewrite = 0;
-
-          continue;
         }
       }
     }
