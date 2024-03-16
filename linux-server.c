@@ -38,11 +38,8 @@ typedef struct USER {
   int  id;
   int  uds;
 
-  int  connect;
-
   char message[BUFFER_SIZE];
   int  message_len;
-
   int  rewrite;
 } user_t;
 
@@ -54,7 +51,6 @@ user_t * create_user(int uds) {
   memset(tmp, 0x00, sizeof(user_t));
 
   tmp->uds         = uds;
-  tmp->connect     = FALSE;
   tmp->message_len = 0;
   tmp->rewrite     = 0;
 
