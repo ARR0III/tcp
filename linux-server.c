@@ -49,12 +49,14 @@ typedef struct USER {
 user_t * create_user(int uds) {
   user_t * tmp = (user_t *)malloc(sizeof(user_t));
 
-  if (!tmp) exit(CANNOT_ALLOCATE_MEMORY);
+  if (!tmp) exit(1);
 
   memset(tmp, 0x00, sizeof(user_t));
 
-  tmp->uds     = uds;
+  tmp->uds         = uds;
+  tmp->connect     = FALSE;
   tmp->message_len = 0;
+  tmp->rewrite     = 0;
 
   return tmp;
 }
@@ -66,12 +68,15 @@ void nonblock(int sd) {
 
 int correct_message(user_t * user) {
   int i;
+  char ch;
 
-  if (user->message_len == 0) return FALSE;
+  for (i = 0; i < (BUFFER_SIZE-1) && i < user->message_len; i++) {
+    ch = user->message[i];
 
-  for (i = 0; i < user->message_len; i++) {
-    if (!isprint((int)(user->message[i]))) {
-      return FALSE;
+    if (!isprint((int)(ch))) {
+      if (ch != 0x0A && ch != 0x0D && ch != '\t' && ch != '\0') {
+        return FALSE;
+      }
     }
   }
 
@@ -79,9 +84,17 @@ int correct_message(user_t * user) {
 }
 
 int read_user_message(int client_socket, user_t * user) {
-  user->message_len = read(client_socket, user->message, BUFFER_SIZE-1);
+  int result = read(client_socket, user->message, BUFFER_SIZE-1);
 
-  return user->message_len;
+  if (result != EOF) {
+    user->message_len = result;
+
+    if (result <= BUFFER_SIZE-1) {
+      user->message[result] = '\0';
+    }
+  }
+
+  return result;
 }
 
 int write_user_message(int client_socket, user_t * user) {
@@ -110,9 +123,10 @@ int main(int argc, char * argv[]) {
   int     server_socket;
   int     client_socket;
 
+  int     result;
+
   int     users_counter = 0;
   int     max_uds;
-  int     result;
 
   short   ip_port = IP_PORT_NORMAL;
 
@@ -121,13 +135,14 @@ int main(int argc, char * argv[]) {
   fd_set read_uds, write_uds; /* read and write "user descriptor socket" */
 
   struct sockaddr_in server_addr;
+
   struct sockaddr_in user_addr;
   socklen_t user_addr_len = sizeof(user_addr);
 
   //struct timeval tmp_tv; /* struct for save timeout time */
 
-  struct timeval tv;     /* timeout 2.5 second */
-    tv.tv_sec  = 2;
+  struct timeval tv;     /* timeout 1.5 second */
+    tv.tv_sec  = 1;
     tv.tv_usec = 500000; /* max value = 999999 */
 
 /*****************************************************************************/
@@ -150,11 +165,7 @@ int main(int argc, char * argv[]) {
 
   for (i = 0; i < LISTEN_USERS_MAX; i++) {
     users_list[i] = create_user(0);
-
-    users_list[i]->id          = i+1;
-    users_list[i]->connect     = FALSE;
-    users_list[i]->message_len = 0;
-    users_list[i]->rewrite     = 0;
+    users_list[i]->id = i+1;
   }
 
 /*****************************************************************************/
@@ -167,14 +178,14 @@ int main(int argc, char * argv[]) {
 
   if (server_socket == SOCKET_CREATE_ERROR) {
     printf("[X] SOCKET CREATE ERROR.\n");
-    exit(SOCKET_CREATE_ERROR);
+    exit(2);
   }
 
   result = bind(server_socket, (struct sockaddr *)(&server_addr), sizeof(server_addr));
 
   if (result == SOCKET_BIND_ERROR) {
     printf("[X] SOCKET BIND ERROR.\n");
-    exit(SOCKET_BIND_ERROR);
+    exit(3);
   }
 
   setsockopt(server_socket, SOL_SOCKET, SO_RCVTIMEO,  &tv, sizeof(tv));
@@ -201,11 +212,11 @@ int main(int argc, char * argv[]) {
     for (i = 0; i < LISTEN_USERS_MAX; i++) {
       client_socket = (*users_list[i]).uds;
 
-      if ((*users_list[i]).connect) {
+      if (client_socket > 0) {
         FD_SET(client_socket, &read_uds);    /*set discr*/
       }
 
-      if ((*users_list[i]).message_len > 0) {
+      if ((*users_list[i]).message_len > 0 || (*users_list[i]).rewrite > 0) {
         FD_SET(client_socket, &write_uds);
       }
 
@@ -214,7 +225,7 @@ int main(int argc, char * argv[]) {
       }
     }
 
-    tv.tv_sec  = 2;
+    tv.tv_sec  = 1;
     tv.tv_usec = 500000; /* max value = 999999 */
 
     result = select(max_uds + 1, &read_uds, &write_uds, NULL, &tv);
@@ -257,49 +268,54 @@ int main(int argc, char * argv[]) {
       write(client_socket, "Welcome!\n", 9);
 
       (*users_list[users_counter]).uds = client_socket;
-      (*users_list[users_counter]).connect = TRUE;
-
-      users_counter++;
 
       printf("[@] User \"%d\" connect to server!\n", (*users_list[users_counter]).id);  
 
-      //if (!users) {
-      //  break;
-      //}
+      users_counter++;
     }
 
     for (i = 0; i < LISTEN_USERS_MAX; i++) {
+      if (!users_counter) {
+        break;
+      }
+
       client_socket = (*users_list[i]).uds;
 
       if (FD_ISSET(client_socket, &read_uds)) {
-
         if (read_user_message(client_socket, users_list[i]) == EOF) { /*read from user 0 byte*/
+
           shutdown(client_socket, SHUT_RDWR);
           close(client_socket);
 
           (*users_list[i]).uds = 0;
-          (*users_list[i]).connect = FALSE;
           (*users_list[i]).message_len = 0;
           (*users_list[i]).rewrite = 0;
+
           users_counter--;
 
           printf("[!] User \"%d\" disconnect!\n", (*users_list[i]).id);
+          continue;
         }
 
         if (correct_message(users_list[i])) {
           printf("[User #%d]>>>%s\n", (*users_list[i]).id, (*users_list[i]).message);
         }
         else {
-          shutdown(client_socket, SHUT_RDWR);
-          close(client_socket);
+          write(client_socket, "EOF.\n", 5);
+
+          (*users_list[i]).message_len = 0;
+          (*users_list[i]).rewrite = 0;
         }
       }
 
       if (FD_ISSET(client_socket, &write_uds)) {
-        result = write_user_message(client_socket, users_list[i]);
+        if (write_user_message(client_socket, users_list[i]) == EOF) {
+          printf("[!] User \"%d\" error send message!\n", (*users_list[i]).id);
 
-        if (result == EOF) {
+          (*users_list[i]).message_len = 0;
+          (*users_list[i]).rewrite = 0;
 
+          continue;
         }
       }
     }
@@ -310,17 +326,16 @@ int main(int argc, char * argv[]) {
   for (i = 0; i < LISTEN_USERS_MAX; i++) {
     client_socket = (*users_list[i]).uds;
 
-    if ((*users_list[i]).connect) {
+    if (client_socket) {
       shutdown(client_socket, SHUT_RDWR);
       close(client_socket);
+
+      memset(users_list[i], 0x00, sizeof(user_t));
+      free(users_list[i]);
     }
   }
 
   close(server_socket);
-
-  for (i = 0; i < LISTEN_USERS_MAX; i++) {
-    free(users_list[i]);
-  }
 
   memset(&server_addr, 0x00, sizeof(server_addr));
   memset(&user_addr,   0x00, sizeof(user_addr));
