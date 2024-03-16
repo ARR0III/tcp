@@ -30,9 +30,10 @@
 
 /* error codes for stderr stream */
 #define RETURN_MEMORY_ERROR    1
-#define RETURN_SOCKET_ERROR    2
-#define RETURN_BIND_ERROR      3
-#define RETURN_SELECT_ERROR    4
+#define RETURN_LISTEN_ERROR    2
+#define RETURN_SOCKET_ERROR    3
+#define RETURN_BIND_ERROR      4
+#define RETURN_SELECT_ERROR    5
 
 #define USER_MSG_QUIT "quit"
 #define USER_MSG_ECHO "echo"
@@ -119,7 +120,7 @@ int write_user_message(int client_socket, user_t * user) {
     return result;
   }
 
-  if (result && result < user->message_len) {
+  if (result > 0 && result < user->message_len) {
     user->rewrite     = user->message_len - (user->message_len - result);
     user->message_len = user->message_len - result;
   }
@@ -208,7 +209,21 @@ int main(int argc, char * argv[]) {
 
   result = listen(server_socket, LISTEN_USERS_MAX);
 
-  printf("[#] Listening clients...\n[#] Maximal clients:\t%d\n", LISTEN_USERS_MAX); 
+  switch(result) {
+    case 0         : printf("[#] Listening clients...\n[#] Maximal clients:%d\n", LISTEN_USERS_MAX); 
+                     break;
+    case EADDRINUSE: printf("[X] Socket active on port:%d\n", ip_port);
+                     break; 
+    case EBADF:      printf("[X] Descriptor socket:%d -> not correct!\n", server_socket);
+                     break;
+    case ENOTSOCK:   printf("[X] Descriptor socket:%d -> not socket!\n", server_socket);
+                     break;
+    case EOPNOTSUPP: printf("[X] Descriptor socket:%d -> not for listen!\n", server_socket);
+                     break;
+    default: break;
+  }
+
+  if (result) exit(RETURN_LISTEN_ERROR);
 
 /*****************************************************************************/
 
