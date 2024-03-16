@@ -278,7 +278,9 @@ int main(int argc, char * argv[]) {
       client_socket = (*users_list[i]).uds;
 
       if (FD_ISSET(client_socket, &read_uds)) {
-        if (read_user_message(client_socket, users_list[i]) == EOF) { /*read from user 0 byte*/
+        result = read_user_message(client_socket, users_list[i]);
+
+        if (result == EOF) { /*read from user 0 byte*/
 
           shutdown(client_socket, SHUT_RDWR);
           close(client_socket);
@@ -293,15 +295,16 @@ int main(int argc, char * argv[]) {
           continue;
         }
 
-        if (correct_message(users_list[i])) {
+        if (result > 0 && correct_message(users_list[i])) {
           printf("[User #%d]>>>%s\n", (*users_list[i]).id, (*users_list[i]).message);
+          continue;
         }
-        else {
-          write(client_socket, "EOF.\n", 5);
 
-          (*users_list[i]).message_len = 0;
-          (*users_list[i]).rewrite = 0;
-        }
+        write(client_socket, "EOF.\n", 5);
+
+        (*users_list[i]).message_len = 0;
+        (*users_list[i]).rewrite = 0;
+
       }
 
       if (FD_ISSET(client_socket, &write_uds)) {
@@ -328,6 +331,7 @@ int main(int argc, char * argv[]) {
 
       memset(users_list[i], 0x00, sizeof(user_t));
       free(users_list[i]);
+      users_list[i] = NULL;
     }
   }
 
