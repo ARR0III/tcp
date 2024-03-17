@@ -13,6 +13,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 
+#define ERROR                 -1
 #define TRUE                   1
 #define FALSE                  0
 
@@ -21,12 +22,6 @@
 #define LISTEN_USERS_MAX      16
 
 #define ECHO_LEN              12
-
-#define SYS_CALL_SELECT_ERROR -1
-
-#define SOCKET_CREATE_ERROR   -1
-#define SOCKET_BIND_ERROR     -1
-#define SOCKET_ACCEPT_ERROR   -1
 
 /* error codes for stderr stream */
 #define RETURN_MEMORY_ERROR    1
@@ -83,6 +78,11 @@ int correct_message(user_t * user) {
   return TRUE;
 }
 
+/*
+  if result = EOF then return -1;
+  if result in [0..BUFFER_SIZE-1] then clear user struct and return result;
+  if result >= BUFFER_SIZE then delete user data and return -1;
+*/
 int read_user_message(int client_socket, user_t * user) {
   int result = read(client_socket, user->message, BUFFER_SIZE-1);
 
@@ -102,6 +102,11 @@ int read_user_message(int client_socket, user_t * user) {
   }
 
   return result;
+}
+
+int welcome_message(int socket) {
+  char data[] = "Welcome to test return data server!\n";
+  return write(socket, data, sizeof(data));
 }
 
 int write_user_message(int client_socket, user_t * user) {
@@ -126,6 +131,52 @@ int write_user_message(int client_socket, user_t * user) {
   }
 
   return result;
+}
+
+int user_add(int socket, user_t ** user) {
+  int pos = 0;
+  user_t * user_struct;
+
+  while(pos < BUFFER_SIZE) {
+    user_struct = user[pos];
+
+    if (0 == user_struct->uds) {
+      user_struct->uds = socket;
+      return pos;
+    }
+
+    pos++;
+  }
+
+  return ERROR;
+}
+
+int user_del(int socket, user_t ** user) {
+  int pos = 0;
+  user_t * user_struct;
+
+  while(pos < BUFFER_SIZE) {
+    user_struct = user[pos];
+
+    if (socket == user_struct->uds) {
+      shutdown(socket, SHUT_RDWR);
+      close(socket);
+
+/* !!! DO NOT CLEAR AND NOT CHANGE user_struct->id !!! */
+
+      user_struct->uds = 0;
+      user_struct->message_len = 0;
+      user_struct->rewrite = 0;
+
+      memset(user_struct->message, 0x00, BUFFER_SIZE);
+
+      return TRUE;
+    }
+
+    pos++;
+  }
+
+  return FALSE;
 }
 
 int main(int argc, char * argv[]) {
@@ -163,7 +214,7 @@ int main(int argc, char * argv[]) {
     ip_port = (short)atoi(argv[1]);
 
     if (ip_port < 1001 || ip_port > 0xFFFF) {
-      printf("[#] Invalid server port number:\t%s\n[#] Set server port:\t%d\n", argv[1], IP_PORT_NORMAL);
+      fprintf(stderr, "[#] Invalid server port number:\t%s\n[#] Set server port:\t%d\n", argv[1], IP_PORT_NORMAL);
       ip_port = IP_PORT_NORMAL;
     }
   }
@@ -188,37 +239,37 @@ int main(int argc, char * argv[]) {
 
   server_socket = socket(AF_INET, SOCK_STREAM, 0);
 
-  if (server_socket == SOCKET_CREATE_ERROR) {
-    printf("[X] SOCKET CREATE ERROR.\n");
+  if (server_socket == ERROR) {
+    fprintf(stderr, "[X] SOCKET CREATE ERROR.\n");
     exit(RETURN_SOCKET_ERROR);
   }
 
   result = bind(server_socket, (struct sockaddr *)(&server_addr), sizeof(server_addr));
 
-  if (result == SOCKET_BIND_ERROR) {
-    printf("[X] SOCKET BIND ERROR.\n");
+  if (result == ERROR) {
+    fprintf(stderr, "[X] SOCKET BIND ERROR.\n");
     exit(RETURN_BIND_ERROR);
   }
 
   setsockopt(server_socket, SOL_SOCKET, SO_RCVTIMEO,  &tv, sizeof(tv));
   setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt/*int*/));
 
-  printf("[#] Server starting port:\t%d\n", ip_port);
+  fprintf(stderr, "[#] Server starting port:%d\n", ip_port);
 
 /*****************************************************************************/
 
   result = listen(server_socket, LISTEN_USERS_MAX);
 
   switch(result) {
-    case 0         : printf("[#] Listening clients...\n[#] Maximal clients:%d\n", LISTEN_USERS_MAX); 
+    case 0         : fprintf(stderr, "[#] Listening clients...\n[#] Maximal clients:%d\n", LISTEN_USERS_MAX); 
                      break;
-    case EADDRINUSE: printf("[X] Socket active on port:%d\n", ip_port);
+    case EADDRINUSE: fprintf(stderr, "[X] Socket active on port:%d\n", ip_port);
                      break; 
-    case EBADF:      printf("[X] Descriptor socket:%d -> not correct!\n", server_socket);
+    case EBADF:      fprintf(stderr, "[X] Descriptor socket:%d -> not correct!\n", server_socket);
                      break;
-    case ENOTSOCK:   printf("[X] Descriptor socket:%d -> not socket!\n", server_socket);
+    case ENOTSOCK:   fprintf(stderr, "[X] Descriptor socket:%d -> not socket!\n", server_socket);
                      break;
-    case EOPNOTSUPP: printf("[X] Descriptor socket:%d -> not for listen!\n", server_socket);
+    case EOPNOTSUPP: fprintf(stderr, "[X] Descriptor socket:%d -> not for listen!\n", server_socket);
                      break;
     default: break;
   }
@@ -255,48 +306,48 @@ int main(int argc, char * argv[]) {
 
     result = select(max_uds + 1, &read_uds, &write_uds, NULL, &tv);
 
-    if (result == SYS_CALL_SELECT_ERROR) {
+    if (result == ERROR) {
       if (errno == EINTR) {
         /* signal */
         continue;
       }
       else {
         /* error select */
-        printf("[X] System call \"select\" return error:\t%d\n", errno);
+        fprintf(stderr, "[X] System call \"select\" return error:%d\n", errno);
         perror("select");
         exit(RETURN_SELECT_ERROR);
       }
     }
 
-    if (!result) { /* not data for check or reaction */
+    if (!result) { /* not data for check or reaction timer */
       continue;
     }
 
     if (FD_ISSET(server_socket, &read_uds)) {
+      user_addr_len = sizeof(user_addr);
       client_socket = accept(server_socket, (struct sockaddr *)(&user_addr), &user_addr_len);
 
       /*if server are first writer to user, then unblock socket user*/
 
-      if (client_socket == SOCKET_ACCEPT_ERROR) {
-        printf("[!] User don\'t connect code:%d", errno);
+      if (client_socket == ERROR) {
+        fprintf(stderr, "[!] User don\'t connect code:%d", errno);
         continue;
         /*error accept user*/
       }
 
-      if (users_counter >= (LISTEN_USERS_MAX-1)) {
-        printf("[!] Maximal users on server:\t%d\n", LISTEN_USERS_MAX);
-        close(client_socket);
-        continue;
+      result = user_add(client_socket, users_list);
+
+      if (result != ERROR) { /* position for user found! */
+        users_counter++;
+        nonblock(client_socket);
+        welcome_message(client_socket);
+
+        fprintf(stderr, "[@] User \"%d\" connect to server!\n", (*users_list[result]).id);  
       }
-
-      nonblock(client_socket);
-      write(client_socket, "Welcome!\n", 9);
-
-      (*users_list[users_counter]).uds = client_socket;
-
-      printf("[@] User \"%d\" connect to server!\n", (*users_list[users_counter]).id);  
-
-      users_counter++;
+      else { /* position for user NOT FOUND! */
+        close(client_socket);
+        fprintf(stderr, "[!] Maximal users on server:\t%d\n", LISTEN_USERS_MAX);
+      }
     }
 
     for (i = 0; i < LISTEN_USERS_MAX; i++) {
@@ -309,26 +360,17 @@ int main(int argc, char * argv[]) {
       if (FD_ISSET(client_socket, &read_uds)) {
         result = read_user_message(client_socket, users_list[i]);
 
-        if (result == EOF || result == 0) { /*read from user 0 byte*/
-
-          FD_CLR(client_socket, &read_uds);
-          FD_CLR(client_socket, &write_uds);
-
-          shutdown(client_socket, SHUT_RDWR);
-          close(client_socket);
-
-          memset((*users_list[i]).message, 0x00, BUFFER_SIZE);
-
-          (*users_list[i]).uds = 0;
-          (*users_list[i]).message_len = 0;
-          (*users_list[i]).rewrite = 0;
-
-          users_counter--;
-
-          printf("[!] User \"%d\" disconnect!\n", (*users_list[i]).id);
+        if (result == EOF || result == 0) { /*read from user 0 byte or none*/
+          if (user_del(client_socket, users_list) == TRUE) {
+            users_counter--;
+            fprintf(stderr, "[!] User \"%d\" disconnect!\n", (*users_list[i]).id);
+          }
+          else {
+            fprintf(stderr, "[!] SERVER LOGICAL ERROR: Not found user for delete!\n");
+          }
 
           if (users_counter == 0) {
-            printf("[!] Not active connections!\n");
+            fprintf(stderr, "[!] Not active connections!\n");
             break;
           }
 
@@ -337,7 +379,7 @@ int main(int argc, char * argv[]) {
 
         if (result > 0) {
           if (correct_message(users_list[i]) == TRUE) {
-            printf("[User #%d]>>>%s\n", (*users_list[i]).id, (*users_list[i]).message);
+            fprintf(stderr, "[User #%d]>>>%s\n", (*users_list[i]).id, (*users_list[i]).message);
           }
           else {
             write(client_socket, "EOF.\n", 5);
@@ -350,7 +392,7 @@ int main(int argc, char * argv[]) {
 
       if (FD_ISSET(client_socket, &write_uds)) {
         if (write_user_message(client_socket, users_list[i]) == EOF) {
-          printf("[!] User \"%d\" error send message!\n", (*users_list[i]).id);
+          fprintf(stderr, "[!] User \"%d\" error send message!\n", (*users_list[i]).id);
 
           (*users_list[i]).message_len = 0;
           (*users_list[i]).rewrite = 0;
