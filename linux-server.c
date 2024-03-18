@@ -23,7 +23,7 @@
 /*****************************************************************************/
 
 #define BUFFER_SIZE         1024
-#define IP_PORT_NORMAL      1888
+#define IP_PORT_STANDART    1888
 
 /*****************************************************************************/
 
@@ -37,12 +37,12 @@
 /*****************************************************************************/
 
 typedef struct USER {
-  int  id;
-  int  uds;
+  int  id;                    /* identification code of user */
+  int  uds;                   /* user data socket */
 
-  char message[BUFFER_SIZE];
-  int  message_len;
-  int  rewrite;
+  char message[BUFFER_SIZE];  /* buffer for user read data */
+  int  message_len;           /* size of data for send to user or read from user */
+  int  rewrite;               /* if > 0 then resend */
 } user_t;
 
 user_t * create_user(int uds) {
@@ -68,6 +68,7 @@ void users_create(user_t ** user, int users_list) {
   }
 }
 
+/* set socket unblock mode */
 void nonblock(int sd) {
   int flags = fcntl(sd, F_GETFL);
   fcntl(sd, flags | O_NONBLOCK);
@@ -83,7 +84,7 @@ int correct_message(user_t * user) {
   int i;
   char ch;
 
-  for (i = 0; i < (BUFFER_SIZE-1) && i < user->message_len; i++) {
+  for (i = 0; i < (BUFFER_SIZE-1) && i < (user->message_len); i++) {
     ch = user->message[i];
 
     if (!isprint((int)(ch))) {
@@ -209,18 +210,16 @@ int main(int argc, char * argv[]) {
   int     users_counter = 0;
   int     max_uds;
 
-  short   ip_port = IP_PORT_NORMAL;
+  short   ip_port = IP_PORT_STANDART;
 
   user_t * users_list[LISTEN_USERS_MAX];
 
-  fd_set read_uds, write_uds; /* read and write "user descriptor socket" */
+  fd_set read_uds, write_uds; /* reader and writer "user descriptor socket" */
 
   struct sockaddr_in server_addr;
 
   struct sockaddr_in user_addr;
   socklen_t user_addr_len = sizeof(user_addr);
-
-  //struct timeval tmp_tv; /* struct for save timeout time */
 
   struct timeval tv;     /* timeout 1.5 second */
     tv.tv_sec  = 1;
@@ -232,8 +231,8 @@ int main(int argc, char * argv[]) {
     ip_port = (short)atoi(argv[1]);
 
     if (ip_port < 1001 || ip_port > 0xFFFF) {
-      fprintf(stderr, "[#] Invalid server port number:\t%s\n[#] Set server port:\t%d\n", argv[1], IP_PORT_NORMAL);
-      ip_port = IP_PORT_NORMAL;
+      fprintf(stderr, "[#] Invalid server port number:\t%s\n[#] Set server port:\t%d\n", argv[1], IP_PORT_STANDART);
+      ip_port = IP_PORT_STANDART;
     }
   }
 
