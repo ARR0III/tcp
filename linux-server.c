@@ -45,12 +45,63 @@ typedef struct USER {
   int  rewrite;               /* if > 0 then resend */
 } user_t;
 
+void * memset2(void * ptr, size_t data, size_t size) {
+  register unsigned char * p = (unsigned char *)ptr;
+  register size_t block, bt, dword = data;
+
+  if (data < 256) {
+    dword |= data  <<  8;
+    dword |= dword << 16;
+  }
+
+  block = size >> 2; /* blocks of 4 bytes */
+  bt    = size  & 3; /* bytes not in 1 block */
+
+  while (block) {
+    *((size_t *)p) = dword;
+    p += sizeof(size_t);
+    block--;
+    if (!block) break;
+
+    *((size_t *)p) = dword;
+    p += sizeof(size_t);
+    block--;
+    if (!block) break;
+
+    *((size_t *)p) = dword;
+    p += sizeof(size_t);
+    block--;
+    if (!block) break;
+
+    *((size_t *)p) = dword;
+    p += sizeof(size_t);
+    block--;
+    if (!block) break;
+  }
+
+  if (p > (unsigned char *)ptr) {
+    p -= (sizeof(size_t) - bt);
+    *((size_t *)p) = dword;
+    
+    return ptr;
+  }
+  
+  while (bt) {
+    *p = (unsigned char)dword;
+
+    p++;
+    bt--;
+  }
+
+  return ptr;
+}
+
 user_t * create_user(int uds) {
   user_t * tmp = (user_t *)malloc(sizeof(user_t));
 
   if (!tmp) exit(RETURN_MEMORY_ERROR);
 
-  memset(tmp, 0x00, sizeof(user_t));
+  memset2(tmp, 0x00, sizeof(user_t));
 
   tmp->uds         = uds;
   tmp->message_len = 0;
@@ -113,7 +164,7 @@ int read_user_message(int client_socket, user_t * user) {
     }
     else {
       /* if read > buffer length (buffer owerflow) then return EOF */
-      /* memset(user->message, 0x00, BUFFER_SIZE); */
+      /* memset2(user->message, 0x00, BUFFER_SIZE); */
       user->message_len = 0;
       user->rewrite = 0;
       result = EOF;
@@ -187,7 +238,7 @@ int user_del(int socket, user_t ** user) {
       user_struct->message_len = 0;
       user_struct->rewrite = 0;
 
-      memset(user_struct->message, 0x00, BUFFER_SIZE);
+      memset2(user_struct->message, 0x00, BUFFER_SIZE);
 
       return TRUE;
     }
@@ -230,7 +281,7 @@ int main(int argc, char * argv[]) {
   if (argc == 2) {
     ip_port = (short)atoi(argv[1]);
 
-    if (ip_port < 1001 || ip_port > 0xFFFF) {
+    if (ip_port < 1001) {
       fprintf(stderr, "[#] Invalid server port number:\t%s\n[#] Set server port:\t%d\n", argv[1], IP_PORT_STANDART);
       ip_port = IP_PORT_STANDART;
     }
@@ -238,8 +289,8 @@ int main(int argc, char * argv[]) {
 
 /*****************************************************************************/
 
-  memset(&server_addr, 0x00, sizeof(server_addr));
-  memset(&user_addr,   0x00, sizeof(user_addr));
+  memset2(&server_addr, 0x00, sizeof(server_addr));
+  memset2(&user_addr,   0x00, sizeof(user_addr));
 
 /*****************************************************************************/
 
@@ -264,6 +315,7 @@ int main(int argc, char * argv[]) {
   result = bind(server_socket, (struct sockaddr *)(&server_addr), sizeof(server_addr));
 
   if (result == ERROR) {
+    close(server_socket);
     fprintf(stderr, "[X] SOCKET BIND ERROR.\n");
     exit(RETURN_BIND_ERROR);
   }
@@ -291,7 +343,10 @@ int main(int argc, char * argv[]) {
     default: break;
   }
 
-  if (result) exit(RETURN_LISTEN_ERROR);
+  if (result) {
+    close(server_socket);
+    exit(RETURN_LISTEN_ERROR);
+  }
 
 /*****************************************************************************/
 
@@ -425,7 +480,7 @@ int main(int argc, char * argv[]) {
       shutdown(client_socket, SHUT_RDWR);
       close(client_socket);
 
-      memset(users_list[i], 0x00, sizeof(user_t));
+      memset2(users_list[i], 0x00, sizeof(user_t));
       free(users_list[i]);
       users_list[i] = NULL;
     }
@@ -433,8 +488,8 @@ int main(int argc, char * argv[]) {
 
   close(server_socket);
 
-  memset(&server_addr, 0x00, sizeof(server_addr));
-  memset(&user_addr,   0x00, sizeof(user_addr));
+  memset2(&server_addr, 0x00, sizeof(server_addr));
+  memset2(&user_addr,   0x00, sizeof(user_addr));
 
   return 0;
 }
