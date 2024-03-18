@@ -11,8 +11,11 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 
-/* CHANGE THIS CONST FOR INITIALIZED MAXIMUM USERS */
-#define LISTEN_USERS_MAX      16
+/* CHANGE THIS CONST FOR INITIALIZED MAXIMUM LISTING CLIENTS */
+#define LISTEN_USERS_MAX      32
+
+/* CHANGE THIS CONST FOR INITIALIZED MAXIMUM USERS ON SERVER */
+#define CONNECT_USERS_MAX     32
 
 /*****************************************************************************/
 
@@ -42,7 +45,7 @@ typedef struct USER {
 
   char message[BUFFER_SIZE];  /* buffer for user read data */
   int  message_len;           /* size of data for send to user or read from user */
-  int  rewrite;               /* if > 0 then resend */
+  int  message_pos;               /* if > 0 then resend */
 } user_t;
 
 void * memset2(void * ptr, size_t data, size_t size) {
@@ -105,7 +108,7 @@ user_t * create_user(int uds) {
 
   tmp->uds         = uds;
   tmp->message_len = 0;
-  tmp->rewrite     = 0;
+  tmp->message_pos = 0;
 
   return tmp;
 }
@@ -148,56 +151,60 @@ int correct_message(user_t * user) {
   return TRUE;
 }
 
-/*
-  if result = EOF then return -1;
-  if result in [0..BUFFER_SIZE-1] then clear user struct and return result;
-  if result >= BUFFER_SIZE then delete user data and return -1;
-*/
-int read_user_message(int client_socket, user_t * user) {
-  int result = read(client_socket, user->message, BUFFER_SIZE-1);
-
-  if (result != EOF) {
-    if (result < BUFFER_SIZE) {
-      user->message[result] = '\0';
-      user->message_len = result;
-      user->rewrite = 0;
-    }
-    else {
-      /* if read > buffer length (buffer owerflow) then return EOF */
-      /* memset2(user->message, 0x00, BUFFER_SIZE); */
-      user->message_len = 0;
-      user->rewrite = 0;
-      result = EOF;
-    }
-  }
-
-  return result;
-}
-
 int welcome_message(int socket) {
   char data[] = "Welcome!\n";
   return write(socket, data, sizeof(data));
+}
+
+int read_user_message(int client_socket, user_t * user) {
+  int result;
+
+  if (user->message_len < BUFFER_SIZE-1) {
+    result = read(client_socket, user->message + user->message_len,
+                                   BUFFER_SIZE - user->message_len - 1);
+  }
+  else {
+    user->message[user->message_len] = '\0';
+    user->message_pos = 0;
+    return TRUE;
+  }
+
+  if (result == EOF) {
+    user->message[user->message_len] = '\0';
+    user->message_pos = 0;
+    return TRUE;
+  }
+
+  if (result > 0 && result < BUFFER_SIZE-1) {
+    user->message_len += result;
+    user->message_pos = 0;
+    return TRUE;
+  }
+
+  return result;
 }
 
 int write_user_message(int client_socket, user_t * user) {
   int result;
 
   if (user->message_len > 0) {
-    result = write(client_socket, user->message + user->rewrite, user->message_len);
+    result = write(client_socket, user->message + user->message_pos, user->message_len);
   }
   else {
     return EOF;
   }
 
   if (result == user->message_len) {
+    user->message[0]  = '\0';
     user->message_len = 0;
-    user->rewrite = 0;
-    return result;
+    user->message_pos = 0;
+    return TRUE;
   }
 
   if (result > 0 && result < user->message_len) {
-    user->rewrite     = user->message_len - (user->message_len - result);
-    user->message_len = user->message_len - result;
+    user->message_pos  = user->message_len - (user->message_len - result);
+    user->message_len -= result;
+    return FALSE;
   }
 
   return result;
@@ -236,7 +243,7 @@ int user_del(int socket, user_t ** user) {
 
       user_struct->uds = 0;
       user_struct->message_len = 0;
-      user_struct->rewrite = 0;
+      user_struct->message_pos = 0;
 
       memset2(user_struct->message, 0x00, BUFFER_SIZE);
 
@@ -263,7 +270,7 @@ int main(int argc, char * argv[]) {
 
   short   ip_port = IP_PORT_STANDART;
 
-  user_t * users_list[LISTEN_USERS_MAX];
+  user_t * users_list[CONNECT_USERS_MAX];
 
   fd_set read_uds, write_uds; /* reader and writer "user descriptor socket" */
 
@@ -282,7 +289,7 @@ int main(int argc, char * argv[]) {
     ip_port = (short)atoi(argv[1]);
 
     if (ip_port < 1001) {
-      fprintf(stderr, "[#] Invalid server port number:\t%s\n[#] Set server port:\t%d\n", argv[1], IP_PORT_STANDART);
+      fprintf(stderr, "[#] Invalid server port number:%s\n[#] Set server port:%d\n", argv[1], IP_PORT_STANDART);
       ip_port = IP_PORT_STANDART;
     }
   }
@@ -294,7 +301,7 @@ int main(int argc, char * argv[]) {
 
 /*****************************************************************************/
 
-  users_create(users_list, LISTEN_USERS_MAX);
+  users_create(users_list, CONNECT_USERS_MAX);
 
 /*****************************************************************************/
 
@@ -330,7 +337,7 @@ int main(int argc, char * argv[]) {
   result = listen(server_socket, LISTEN_USERS_MAX);
 
   switch(result) {
-    case 0         : fprintf(stderr, "[#] Listening clients...\n[#] Maximal clients:%d\n", LISTEN_USERS_MAX); 
+    case 0         : fprintf(stderr, "[#] Maximal wait OS listening:%d\n[#] Listening...\n", LISTEN_USERS_MAX);
                      break;
     case EADDRINUSE: fprintf(stderr, "[X] Socket active on port:%d\n", ip_port);
                      break; 
@@ -357,7 +364,7 @@ int main(int argc, char * argv[]) {
     FD_ZERO(&write_uds);                     /*clear lists for read*/
     FD_SET(server_socket, &read_uds);        /*set server for select*/
 
-    for (i = 0; i < LISTEN_USERS_MAX; i++) {
+    for (i = 0; i < CONNECT_USERS_MAX; i++) {
       client_socket = (*users_list[i]).uds;  /*uds set if user connect*/
 
       if (client_socket > 0) {
@@ -405,9 +412,15 @@ int main(int argc, char * argv[]) {
         continue;
       }
 
+      if (users_counter < 0 || users_counter >= CONNECT_USERS_MAX) {
+        close(client_socket);
+        fprintf(stderr, "[!] Maximal users on server:%d\n", CONNECT_USERS_MAX);
+        continue;
+      }
+
       result = user_add(client_socket, users_list);
 
-      if (result != ERROR) { /* position for user found! */
+      if (result != ERROR) { /* position for user in array found! */
         users_counter++;
         nonblock(client_socket);
         welcome_message(client_socket);
@@ -416,12 +429,13 @@ int main(int argc, char * argv[]) {
       }
       else { /* position for user NOT FOUND! */
         close(client_socket);
-        fprintf(stderr, "[!] Maximal users on server:\t%d\n", LISTEN_USERS_MAX);
+        fprintf(stderr, "[!] Position for user on server not found!\n");
+        continue;
       }
     }
 
-    for (i = 0; i < LISTEN_USERS_MAX; i++) {
-      if (users_counter == 0) {
+    for (i = 0; i < CONNECT_USERS_MAX; i++) {
+      if (0 == users_counter) {
        break;
       }
 
@@ -430,7 +444,18 @@ int main(int argc, char * argv[]) {
       if (FD_ISSET(client_socket, &read_uds)) {
         result = read_user_message(client_socket, users_list[i]);
 
-        if (result == EOF || result == 0) { /*read from user 0 byte or none*/
+        /* if result != TRUE then continue read from socket */
+
+        if (result == TRUE) {
+          if (correct_message(users_list[i]) == TRUE) {
+            fprintf(stderr, "[User #%d]>>>%s\n", (*users_list[i]).id, (*users_list[i]).message);
+          }
+          else {
+            eof_message(client_socket);
+          }
+        }
+
+        if (result == 0) {
           if (user_del(client_socket, users_list) == TRUE) {
             users_counter--;
             fprintf(stderr, "[!] User \"%d\" disconnect!\n", (*users_list[i]).id);
@@ -446,26 +471,11 @@ int main(int argc, char * argv[]) {
 
           continue;
         }
-
-        if (result > 0) {
-          if (correct_message(users_list[i]) == TRUE) {
-            fprintf(stderr, "[User #%d]>>>%s\n", (*users_list[i]).id, (*users_list[i]).message);
-          }
-          else {
-            eof_message(client_socket);
-
-            (*users_list[i]).message_len = 0;
-            (*users_list[i]).rewrite = 0;
-          }
-        }
       }
 
       if (FD_ISSET(client_socket, &write_uds)) {
         if (write_user_message(client_socket, users_list[i]) == EOF) {
           fprintf(stderr, "[!] User \"%d\" error send message!\n", (*users_list[i]).id);
-
-          (*users_list[i]).message_len = 0;
-          (*users_list[i]).rewrite = 0;
         }
       }
     }
@@ -473,7 +483,7 @@ int main(int argc, char * argv[]) {
 
 /*****************************************************************************/
 
-  for (i = 0; i < LISTEN_USERS_MAX; i++) {
+  for (i = 0; i < CONNECT_USERS_MAX; i++) {
     client_socket = (*users_list[i]).uds;
 
     if (client_socket) {
