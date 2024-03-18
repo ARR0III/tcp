@@ -1,9 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
 #include <ctype.h>
-
 #include <errno.h>
 
 #include <fcntl.h>
@@ -13,15 +11,21 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 
+/* CHANGE THIS CONST FOR INITIALIZED MAXIMUM USERS */
+#define LISTEN_USERS_MAX      16
+
+/*****************************************************************************/
+
 #define ERROR                 -1
 #define TRUE                   1
 #define FALSE                  0
 
+/*****************************************************************************/
+
 #define BUFFER_SIZE         1024
 #define IP_PORT_NORMAL      1888
-#define LISTEN_USERS_MAX      16
 
-#define ECHO_LEN              12
+/*****************************************************************************/
 
 /* error codes for stderr stream */
 #define RETURN_MEMORY_ERROR    1
@@ -30,8 +34,7 @@
 #define RETURN_BIND_ERROR      4
 #define RETURN_SELECT_ERROR    5
 
-#define USER_MSG_QUIT "quit"
-#define USER_MSG_ECHO "echo"
+/*****************************************************************************/
 
 typedef struct USER {
   int  id;
@@ -56,9 +59,24 @@ user_t * create_user(int uds) {
   return tmp;
 }
 
+void users_create(user_t ** user, int users_list) {
+  int i;
+
+  for (i = 0; i < users_list; i++) {
+    user[i]      = create_user(0);
+    user[i]->id  = i+1;
+  }
+}
+
 void nonblock(int sd) {
   int flags = fcntl(sd, F_GETFL);
   fcntl(sd, flags | O_NONBLOCK);
+}
+
+
+void eof_message(int client) {
+  char EOF_MESSAGE[] = "EOF.\n";
+  write(client, EOF_MESSAGE, sizeof(EOF_MESSAGE));
 }
 
 int correct_message(user_t * user) {
@@ -94,7 +112,7 @@ int read_user_message(int client_socket, user_t * user) {
     }
     else {
       /* if read > buffer length (buffer owerflow) then return EOF */
-      memset(user->message, 0x00, BUFFER_SIZE);
+      /* memset(user->message, 0x00, BUFFER_SIZE); */
       user->message_len = 0;
       user->rewrite = 0;
       result = EOF;
@@ -105,7 +123,7 @@ int read_user_message(int client_socket, user_t * user) {
 }
 
 int welcome_message(int socket) {
-  char data[] = "Welcome to test return data server!\n";
+  char data[] = "Welcome!\n";
   return write(socket, data, sizeof(data));
 }
 
@@ -120,8 +138,8 @@ int write_user_message(int client_socket, user_t * user) {
   }
 
   if (result == user->message_len) {
-    user->rewrite = 0;
     user->message_len = 0;
+    user->rewrite = 0;
     return result;
   }
 
@@ -226,10 +244,7 @@ int main(int argc, char * argv[]) {
 
 /*****************************************************************************/
 
-  for (i = 0; i < LISTEN_USERS_MAX; i++) {
-    users_list[i] = create_user(0);
-    users_list[i]->id = i+1;
-  }
+  users_create(users_list, LISTEN_USERS_MAX);
 
 /*****************************************************************************/
 
@@ -243,6 +258,9 @@ int main(int argc, char * argv[]) {
     fprintf(stderr, "[X] SOCKET CREATE ERROR.\n");
     exit(RETURN_SOCKET_ERROR);
   }
+
+  /* What??? Why??? */
+  nonblock(server_socket);
 
   result = bind(server_socket, (struct sockaddr *)(&server_addr), sizeof(server_addr));
 
@@ -281,9 +299,9 @@ int main(int argc, char * argv[]) {
   while (1) {
     max_uds = server_socket;
 
-    FD_ZERO(&read_uds);                 /*clear lists for read*/
-    FD_ZERO(&write_uds);                /*clear lists for read*/
-    FD_SET(server_socket, &read_uds);   /*set server for select*/
+    FD_ZERO(&read_uds);                      /*clear lists for read*/
+    FD_ZERO(&write_uds);                     /*clear lists for read*/
+    FD_SET(server_socket, &read_uds);        /*set server for select*/
 
     for (i = 0; i < LISTEN_USERS_MAX; i++) {
       client_socket = (*users_list[i]).uds;  /*uds set if user connect*/
@@ -308,11 +326,10 @@ int main(int argc, char * argv[]) {
 
     if (result == ERROR) {
       if (errno == EINTR) {
-        /* signal */
+        /* if process <-- signal */
         continue;
       }
       else {
-        /* error select */
         fprintf(stderr, "[X] System call \"select\" return error:%d\n", errno);
         perror("select");
         exit(RETURN_SELECT_ERROR);
@@ -332,7 +349,6 @@ int main(int argc, char * argv[]) {
       if (client_socket == ERROR) {
         fprintf(stderr, "[!] User don\'t connect code:%d", errno);
         continue;
-        /*error accept user*/
       }
 
       result = user_add(client_socket, users_list);
@@ -342,7 +358,7 @@ int main(int argc, char * argv[]) {
         nonblock(client_socket);
         welcome_message(client_socket);
 
-        fprintf(stderr, "[@] User \"%d\" connect to server!\n", (*users_list[result]).id);  
+        fprintf(stderr, "[@] User \"%d\" connect to server!\n", (*users_list[result]).id);
       }
       else { /* position for user NOT FOUND! */
         close(client_socket);
@@ -382,7 +398,7 @@ int main(int argc, char * argv[]) {
             fprintf(stderr, "[User #%d]>>>%s\n", (*users_list[i]).id, (*users_list[i]).message);
           }
           else {
-            write(client_socket, "EOF.\n", 5);
+            eof_message(client_socket);
 
             (*users_list[i]).message_len = 0;
             (*users_list[i]).rewrite = 0;
