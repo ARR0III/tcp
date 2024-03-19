@@ -46,7 +46,7 @@ typedef struct USER {
 
   char message[BUFFER_SIZE];  /* buffer for user read data */
   int  message_len;           /* size of data for send to user or read from user */
-  int  message_pos;               /* if > 0 then resend */
+  int  message_pos;           /* if > 0 then resend */
 } user_t;
 
 void * memset2(void * ptr, size_t data, size_t size) {
