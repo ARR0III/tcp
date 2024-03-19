@@ -12,7 +12,7 @@
 #include <netinet/in.h>
 
 /* CHANGE THIS CONST FOR INITIALIZED MAXIMUM LISTING CLIENTS */
-#define LISTEN_USERS_MAX      32
+#define LISTEN_USERS_MAX      16
 
 /* CHANGE THIS CONST FOR INITIALIZED MAXIMUM USERS ON SERVER */
 #define CONNECT_USERS_MAX     32
@@ -20,8 +20,9 @@
 /*****************************************************************************/
 
 #define ERROR                 -1
-#define TRUE                   1
 #define FALSE                  0
+#define TRUE                   1
+#define WAIT                   2
 
 /*****************************************************************************/
 
@@ -138,11 +139,16 @@ int correct_message(user_t * user) {
   int i;
   char ch;
 
-  for (i = 0; i < (BUFFER_SIZE-1) && i < (user->message_len); i++) {
+  for (i = 0; (i < BUFFER_SIZE-1) && (i < user->message_len); i++) {
     ch = user->message[i];
 
     if (!isprint((int)(ch))) {
-      if (ch != 0x0A && ch != 0x0D && ch != '\t' && ch != '\0') {
+      if (ch == 0x0A || ch == 0x0D) {
+        user->message[i] = '\0';
+        return TRUE;
+      }
+
+      if (ch != '\t' && ch != '\0') {
         return FALSE;
       }
     }
@@ -156,12 +162,45 @@ int welcome_message(int socket) {
   return write(socket, data, sizeof(data));
 }
 
-int read_user_message(int client_socket, user_t * user) {
-  int result;
+int read_user_full_message(int client_socket, user_t * user) {
+  int result = TRUE;
+  int read_size = BUFFER_SIZE - user->message_pos - 1;
 
   if (user->message_len < BUFFER_SIZE-1) {
-    result = read(client_socket, user->message + user->message_len,
-                                   BUFFER_SIZE - user->message_len - 1);
+    result = read(client_socket, user->message + user->message_pos, read_size);
+
+    if (result == EOF) {
+      user->message[user->message_len] = '\0';
+      user->message_pos = 0;
+      return TRUE;
+    }
+
+    if (result == read_size) {
+      user->message[user->message_pos + result]  = '\0';
+      user->message_len += result;
+      user->message_pos  = 0;
+      return TRUE;
+    }
+
+    if (result > 0 && result < read_size) {
+      user->message_len += result;
+      user->message_pos += result;
+      return WAIT;
+    }
+  }
+
+  user->message[user->message_len] = '\0';
+  user->message_pos = 0;
+
+  return result;
+}
+
+int read_user_message(int client_socket, user_t * user) {
+  int result = TRUE;
+  int read_size = BUFFER_SIZE - user->message_pos - 1;
+
+  if (user->message_len < BUFFER_SIZE-1) {
+    result = read(client_socket, user->message + user->message_pos, read_size);
   }
   else {
     user->message[user->message_len] = '\0';
@@ -175,9 +214,16 @@ int read_user_message(int client_socket, user_t * user) {
     return TRUE;
   }
 
-  if (result > 0 && result < BUFFER_SIZE-1) {
+  if (result == read_size) {
+    user->message[user->message_pos + result]  = '\0';
     user->message_len += result;
-    user->message_pos = 0;
+    user->message_pos  = 0;
+    return TRUE;
+  }
+
+  if (result > 0 && result < read_size) {
+    user->message_len += result;
+    user->message_pos  = 0;
     return TRUE;
   }
 
@@ -185,7 +231,7 @@ int read_user_message(int client_socket, user_t * user) {
 }
 
 int write_user_message(int client_socket, user_t * user) {
-  int result;
+  int result = 0;
 
   if (user->message_len > 0) {
     result = write(client_socket, user->message + user->message_pos, user->message_len);
@@ -202,9 +248,9 @@ int write_user_message(int client_socket, user_t * user) {
   }
 
   if (result > 0 && result < user->message_len) {
-    user->message_pos  = user->message_len - (user->message_len - result);
+    user->message_pos += result;
     user->message_len -= result;
-    return FALSE;
+    return WAIT;
   }
 
   return result;
@@ -436,7 +482,7 @@ int main(int argc, char * argv[]) {
 
     for (i = 0; i < CONNECT_USERS_MAX; i++) {
       if (0 == users_counter) {
-       break;
+        break;
       }
 
       client_socket = (*users_list[i]).uds;
@@ -444,7 +490,7 @@ int main(int argc, char * argv[]) {
       if (FD_ISSET(client_socket, &read_uds)) {
         result = read_user_message(client_socket, users_list[i]);
 
-        /* if result != TRUE then continue read from socket */
+        /* if result == WAIT then continue read from socket */
 
         if (result == TRUE) {
           if (correct_message(users_list[i]) == TRUE) {
@@ -455,7 +501,7 @@ int main(int argc, char * argv[]) {
           }
         }
 
-        if (result == 0) {
+        if (result == FALSE) {
           if (user_del(client_socket, users_list) == TRUE) {
             users_counter--;
             fprintf(stderr, "[!] User \"%d\" disconnect!\n", (*users_list[i]).id);
@@ -475,6 +521,7 @@ int main(int argc, char * argv[]) {
 
       if (FD_ISSET(client_socket, &write_uds)) {
         if (write_user_message(client_socket, users_list[i]) == EOF) {
+          user_del(client_socket, users_list);
           fprintf(stderr, "[!] User \"%d\" error send message!\n", (*users_list[i]).id);
         }
       }
