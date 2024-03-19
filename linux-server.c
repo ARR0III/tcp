@@ -260,7 +260,7 @@ int user_add(int socket, user_t ** user) {
   int pos = 0;
   user_t * user_struct;
 
-  while(pos < BUFFER_SIZE) {
+  while(pos < CONNECT_USERS_MAX) {
     user_struct = user[pos];
 
     if (0 == user_struct->uds) {
@@ -278,7 +278,7 @@ int user_del(int socket, user_t ** user) {
   int pos = 0;
   user_t * user_struct;
 
-  while(pos < BUFFER_SIZE) {
+  while(pos < CONNECT_USERS_MAX) {
     user_struct = user[pos];
 
     if (socket == user_struct->uds) {
