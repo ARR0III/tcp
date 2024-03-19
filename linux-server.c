@@ -507,7 +507,7 @@ int main(int argc, char * argv[]) {
             fprintf(stderr, "[!] User \"%d\" disconnect!\n", (*users_list[i]).id);
           }
           else {
-            fprintf(stderr, "[!] SERVER LOGICAL ERROR: Not found user for delete!\n");
+            fprintf(stderr, "[X] SERVER LOGICAL ERROR: Not found user for delete!\n");
           }
 
           if (users_counter == 0) {
