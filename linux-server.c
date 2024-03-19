@@ -100,14 +100,16 @@ void * memset2(void * ptr, size_t data, size_t size) {
   return ptr;
 }
 
-user_t * create_user(int uds) {
+user_t * create_user(int id, int uds) {
   user_t * tmp = (user_t *)malloc(sizeof(user_t));
 
   if (!tmp) exit(RETURN_MEMORY_ERROR);
 
   memset2(tmp, 0x00, sizeof(user_t));
 
+  tmp->id          = id;
   tmp->uds         = uds;
+  tmp->message[0]  = (char)0;
   tmp->message_len = 0;
   tmp->message_pos = 0;
 
@@ -118,8 +120,7 @@ void users_create(user_t ** user, int users_list) {
   int i;
 
   for (i = 0; i < users_list; i++) {
-    user[i]      = create_user(0);
-    user[i]->id  = i+1;
+    user[i] = create_user(i+1, 0);
   }
 }
 
@@ -128,7 +129,6 @@ void nonblock(int sd) {
   int flags = fcntl(sd, F_GETFL);
   fcntl(sd, flags | O_NONBLOCK);
 }
-
 
 void eof_message(int client) {
   char EOF_MESSAGE[] = "EOF.\n";
