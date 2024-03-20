@@ -142,19 +142,17 @@ int correct_message(user_t * user) {
   for (i = 0; (i < BUFFER_SIZE-1) && (i < user->message_len); i++) {
     ch = user->message[i];
 
-    if (!isprint((int)(ch))) {
-      if (ch == 0x0A || ch == 0x0D) {
-        user->message[i] = '\0';
-        return TRUE;
-      }
+    if (isprint(ch) || ch == '\t') {
+      continue;
+    }
 
-      if (ch != '\t' && ch != '\0') {
-        return FALSE;
-      }
+    if (ch == '\0' || ch == '\r' || ch == 0x0A || ch == 0x0D) {
+      user->message[i] = '\0';
+      return TRUE;
     }
   }
 
-  return TRUE;
+  return FALSE;
 }
 
 int welcome_message(int socket) {
@@ -515,6 +513,7 @@ int main(int argc, char * argv[]) {
             break;
           }
 
+          /* if user disconnect then don't check user for writing */
           continue;
         }
       }
